@@ -1,1 +1,1 @@
-# uptoskills-ai-assistant
+# UptoSkills-ai-assistant
