@@ -1,0 +1,143 @@
+"""
+Pytest configuration, shared fixtures, and sample data generators
+for the UpToSkills RAG Ingestion Pipeline tests.
+"""
+
+import io
+import sys
+import zipfile
+from pathlib import Path
+import pytest
+from PIL import Image
+
+# Ensure repository root and backend directory are in sys.path
+backend_dir = Path(__file__).resolve().parent.parent
+project_root = backend_dir.parent
+
+for p in (str(project_root), str(backend_dir)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from backend.ingestion.metadata import MetadataManager
+from backend.ingestion.pipeline import IngestionPipeline
+from backend.ingestion.storage import StorageManager
+from backend.ingestion.validator import FileValidator
+
+
+@pytest.fixture
+def temp_storage_dir(tmp_path):
+    """Provides an isolated temporary storage directory."""
+    storage_dir = tmp_path / "test_storage"
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    return storage_dir
+
+
+@pytest.fixture
+def temp_db_path(tmp_path):
+    """Provides an isolated temporary SQLite database path."""
+    return tmp_path / "test_metadata.db"
+
+
+@pytest.fixture
+def storage_manager(temp_storage_dir):
+    """Provides a StorageManager instance using temporary directory."""
+    return StorageManager(base_dir=temp_storage_dir)
+
+
+@pytest.fixture
+def metadata_manager(temp_db_path):
+    """Provides a MetadataManager instance using temporary database."""
+    return MetadataManager(db_path=temp_db_path)
+
+
+@pytest.fixture
+def validator():
+    """Provides a FileValidator instance with default rules."""
+    return FileValidator()
+
+
+@pytest.fixture
+def pipeline(validator, storage_manager, metadata_manager):
+    """Provides a full IngestionPipeline instance with isolated storage and DB."""
+    return IngestionPipeline(
+        validator=validator,
+        storage_manager=storage_manager,
+        metadata_manager=metadata_manager,
+    )
+
+
+# Sample content generators
+def create_sample_pdf() -> bytes:
+    """Generates a valid minimalist PDF file buffer."""
+    return (
+        b"%PDF-1.4\n"
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n"
+        b"xref\n0 4\n0000000000 65535 f \n"
+        b"trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n123\n%%EOF"
+    )
+
+
+def create_sample_docx() -> bytes:
+    """Generates a valid minimalist DOCX zip buffer."""
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types></Types>')
+        zf.writestr("word/document.xml", '<?xml version="1.0" encoding="UTF-8"?><w:document></w:document>')
+    return bio.getvalue()
+
+
+def create_sample_txt() -> bytes:
+    """Generates a valid UTF-8 text buffer."""
+    return "This is a valid UpToSkills test document for the RAG ingestion pipeline.".encode("utf-8")
+
+
+def create_sample_png() -> bytes:
+    """Generates a valid PNG image buffer using Pillow."""
+    bio = io.BytesIO()
+    img = Image.new("RGB", (20, 20), color=(73, 109, 137))
+    img.save(bio, format="PNG")
+    return bio.getvalue()
+
+
+def create_sample_jpeg() -> bytes:
+    """Generates a valid JPEG image buffer using Pillow."""
+    bio = io.BytesIO()
+    img = Image.new("RGB", (20, 20), color=(255, 0, 0))
+    img.save(bio, format="JPEG")
+    return bio.getvalue()
+
+
+def create_sample_webp() -> bytes:
+    """Generates a valid WEBP image buffer using Pillow."""
+    bio = io.BytesIO()
+    img = Image.new("RGB", (20, 20), color=(0, 255, 0))
+    img.save(bio, format="WEBP")
+    return bio.getvalue()
+
+
+def create_sample_mp4() -> bytes:
+    """Generates a valid MP4 header buffer (ISO BMFF with ftyp atom)."""
+    # 4 bytes size (0x1c = 28), 4 bytes 'ftyp', major_brand 'isom', minor_version 0x200, compatible 'isom', 'iso2', 'mp41'
+    return b"\x00\x00\x00\x1cftypisom\x00\x00\x02\x00isomiso2mp41\x00\x00\x00\x08mdat"
+
+
+def create_sample_mov() -> bytes:
+    """Generates a valid QuickTime MOV header buffer."""
+    return b"\x00\x00\x00\x14ftypqt  \x20\x05\x03\x00qt  \x00\x00\x00\x08mdat"
+
+
+def create_sample_avi() -> bytes:
+    """Generates a valid AVI header buffer."""
+    return b"RIFF\x24\x00\x00\x00AVI LIST\x00\x00\x00\x00"
+
+
+def create_sample_mkv() -> bytes:
+    """Generates a valid Matroska MKV EBML header buffer."""
+    return b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\xf7\x81\x01\x42\xf2\x81\x04\x42\xf3\x81\x08\x42\x82\x84matroska"
+
+
+def create_sample_webm() -> bytes:
+    """Generates a valid WebM EBML header buffer."""
+    return b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\xf7\x81\x01\x42\xf2\x81\x04\x42\xf3\x81\x08\x42\x82\x84webm"
