@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import List, Optional, Tuple, Union
 from pathlib import Path
 
+from backend.ingestion.text_extractor import extract_text
 from backend.config import ENABLE_DUPLICATE_DETECTION
 from backend.ingestion.metadata import MetadataManager
 from backend.ingestion.models import (
@@ -113,12 +114,26 @@ class IngestionPipeline:
         )
         self.metadata.save(meta)
 
+        # Step 5: Extract text from supported documents
+        extracted_content = None
+        extraction_error = None
+
+        if Path(abs_path).suffix.lower() in [".pdf", ".docx", ".txt"]:
+            try:
+                extracted_content = extract_text(abs_path)
+                print("Text extraction successful!")
+            except Exception as e:
+                extraction_error = str(e)
+                print(f"Text extraction failed: {e}")
+
         return IngestionResult(
             success=True,
             document_id=doc_id,
             validation_result=validation_res,
             metadata=meta,
-            message="Document successfully validated, stored, and cataloged.",
+            extracted_content=extracted_content,
+            extraction_error=extraction_error,
+            message="Document successfully validated, stored, and processed.",
         )
 
     def process_batch(self, files: List[Tuple[str, bytes]]) -> List[IngestionResult]:

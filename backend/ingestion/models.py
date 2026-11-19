@@ -54,10 +54,13 @@ class DocumentMetadata(BaseModel):
     metadata_json: Optional[str] = None
 
 
+
 class IngestionResult(BaseModel):
     """Final outcome of the ingestion pipeline for a single file."""
     success: bool
     document_id: Optional[str] = None
     validation_result: ValidationResult
     metadata: Optional[DocumentMetadata] = None
+    extracted_content: Optional[Dict[str, Any]] = None
+    extraction_error: Optional[str] = None
     message: str
