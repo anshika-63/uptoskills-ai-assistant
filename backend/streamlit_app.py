@@ -260,6 +260,38 @@ with tab_upload:
                         st.caption(f"Full SHA-256 Digest: `{val.sha256_hash}`")
 
 
+                    # Display extracted text
+                    if res.extraction_error:
+                        st.error(f"Text extraction failed: {res.extraction_error}")
+
+                    elif res.extracted_content:
+                        st.markdown("#### Extracted Text")
+
+                        extracted = res.extracted_content
+
+                        if extracted["file_type"] == "pdf":
+                            for page in extracted["pages"]:
+                                with st.expander(f"Page {page['page_number']}"):
+                                    st.text(page["text"] or "No text found on this page.")
+
+                        elif extracted["file_type"] == "docx":
+                            st.markdown("**Paragraphs**")
+                            for paragraph in extracted["paragraphs"]:
+                                st.write(paragraph)
+
+                            if extracted["tables"]:
+                                st.markdown("**Tables**")
+                                for table in extracted["tables"]:
+                                    st.table(table)
+
+                        elif extracted["file_type"] == "txt":
+                            st.text(extracted["text"])
+
+                    else:
+                        st.info("No extracted text available.")
+
+
+
 # TAB 2: Verification Dashboard
 with tab_dashboard:
     st.markdown("### Ingested Documents Registry")
@@ -386,8 +418,9 @@ with tab_audit:
           - Cryptographic duplicate detection via SHA-256 hashing.
           - Persistent SQLite metadata store with indexed lookup.
           - Streamlit verification dashboard.
+          - Text extraction from PDF, DOCX and TXT using PyMuPDF and python-docx.
         - **Out of Scope (Reserved for Phase 2):**
-          - Text extraction & OCR (PyPDF2, Tesseract, pdfplumber).
+
           - Video audio extraction and transcription (Whisper).
           - Preprocessing, text cleaning, chunking.
           - Embedding generation & ChromaDB vector ingestion.
