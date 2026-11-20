@@ -62,5 +62,6 @@ class IngestionResult(BaseModel):
     validation_result: ValidationResult
     metadata: Optional[DocumentMetadata] = None
     extracted_content: Optional[Dict[str, Any]] = None
+    preprocessed_content: Optional[list] = None
     extraction_error: Optional[str] = None
     message: str
