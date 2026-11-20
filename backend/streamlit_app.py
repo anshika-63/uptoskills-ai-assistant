@@ -439,9 +439,21 @@ with tab_upload:
                             key_prefix=f"upload_{idx}",
                         )
                     elif res.extraction_status == "not_applicable":
-                        st.info("Text extraction is not applicable for this file type (images and videos are not extracted).")
+                        st.info("Text extraction is not applicable for this file type.")
                     else:
                         st.warning("No extracted text or transcript available.")
+
+                    # Preprocessed Chunks Display
+                    if res.preprocessed_content:
+                        st.markdown("---")
+                        st.markdown(f"#### 🧩 Preprocessed Chunks ({len(res.preprocessed_content)})")
+                        with st.expander(f"View {len(res.preprocessed_content)} chunks with token estimates", expanded=False):
+                            for c_idx, chunk in enumerate(res.preprocessed_content):
+                                page_info = f" · Page {chunk['page_number']}" if chunk.get("page_number") else ""
+                                token_info = f" · ~{chunk.get('estimated_tokens', '?')} tokens"
+                                within_limit = "✅ Within limit" if chunk.get("within_token_limit", True) else "⚠️ Exceeds limit"
+                                st.markdown(f"**Chunk {c_idx + 1}** ({within_limit}{page_info}{token_info})")
+                                st.text(chunk.get("text", ""))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -661,4 +673,3 @@ with tab_audit:
             st.write(f"**Extraction Records:** {cnt} total · {succ} successful")
         except Exception:
             st.write("**Extraction Records:** table initializes on first upload")
-

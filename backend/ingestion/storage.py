@@ -76,26 +76,33 @@ class StorageManager:
         relative_path = str(target_path.relative_to(self.base_dir)).replace("\\", "/")
         return target_path, relative_path
 
-    def file_exists(self, path: Union[str, Path]) -> bool:
-        """Checks if a file exists given an absolute or relative path."""
+    def _resolve_safe_path(self, path: Union[str, Path]) -> Path:
+        """Resolves path and enforces that it remains within base_dir."""
         p = Path(path)
         if not p.is_absolute():
             p = self.base_dir / p
-        return p.exists() and p.is_file()
+        resolved = p.resolve()
+        if not resolved.is_relative_to(self.base_dir):
+            raise PermissionError(f"Access denied: path '{path}' escapes storage directory.")
+        return resolved
+
+    def file_exists(self, path: Union[str, Path]) -> bool:
+        """Checks if a file exists given an absolute or relative path."""
+        try:
+            p = self._resolve_safe_path(path)
+            return p.exists() and p.is_file()
+        except PermissionError:
+            return False
 
     def read_file(self, path: Union[str, Path]) -> bytes:
         """Reads file bytes from disk."""
-        p = Path(path)
-        if not p.is_absolute():
-            p = self.base_dir / p
+        p = self._resolve_safe_path(path)
         with open(p, "rb") as f:
             return f.read()
 
     def delete_file(self, path: Union[str, Path]) -> bool:
         """Deletes a file if it exists."""
-        p = Path(path)
-        if not p.is_absolute():
-            p = self.base_dir / p
+        p = self._resolve_safe_path(path)
         if p.exists() and p.is_file():
             p.unlink()
             return True

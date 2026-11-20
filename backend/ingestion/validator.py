@@ -201,6 +201,41 @@ class FileValidator:
                     return False, None, f"Corrupted {ext[1:].upper()}: missing EBML signature."
                 return True, expected_mime, None
 
+            elif ext == ".mp3":
+                # Check for ID3 tag or MPEG frame sync header (11 sync bits: 0xFF followed by 0xE0 mask)
+                is_id3 = content.startswith(b"ID3")
+                is_sync = len(content) >= 2 and content[0] == 0xFF and (content[1] & 0xE0) == 0xE0
+                if not (is_id3 or is_sync):
+                    return False, None, "Corrupted MP3: missing ID3 or MPEG frame sync header."
+                return True, expected_mime, None
+
+            elif ext == ".wav":
+                if not (content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WAVE"):
+                    return False, None, "Corrupted WAV: missing RIFF/WAVE header signature."
+                return True, expected_mime, None
+
+            elif ext == ".flac":
+                if not content.startswith(b"fLaC"):
+                    return False, None, "Corrupted FLAC: missing 'fLaC' marker."
+                return True, expected_mime, None
+
+            elif ext == ".ogg":
+                if not content.startswith(b"OggS"):
+                    return False, None, "Corrupted OGG: missing 'OggS' capture pattern."
+                return True, expected_mime, None
+
+            elif ext == ".m4a":
+                if not (len(content) >= 12 and content[4:8] == b"ftyp"):
+                    return False, None, "Corrupted M4A: missing ISO/M4A 'ftyp' box."
+                return True, expected_mime, None
+
+            elif ext == ".aac":
+                is_adts = len(content) >= 2 and content[0] == 0xFF and (content[1] & 0xF0) == 0xF0
+                is_id3 = content.startswith(b"ID3")
+                if not (is_adts or is_id3):
+                    return False, None, "Corrupted AAC: missing ADTS syncword or ID3 header."
+                return True, expected_mime, None
+
             else:
                 return False, None, f"Unsupported file extension: {ext}"
 

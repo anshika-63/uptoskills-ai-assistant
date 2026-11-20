@@ -13,6 +13,7 @@ class FileCategory(str, Enum):
     DOCUMENTS = "documents"
     IMAGES = "images"
     VIDEOS = "videos"
+    AUDIO = "audio"
 
 
 class ValidationStatus(str, Enum):
@@ -58,6 +59,8 @@ class DocumentMetadata(BaseModel):
 class IngestionResult(BaseModel):
     """Final outcome of the ingestion pipeline for a single file."""
     success: bool
+    upload_success: bool = False
+    extraction_status: str = "not_applicable"
     document_id: Optional[str] = None
     validation_result: ValidationResult
     metadata: Optional[DocumentMetadata] = None

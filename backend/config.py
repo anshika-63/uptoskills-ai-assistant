@@ -24,6 +24,7 @@ CATEGORY_DIRECTORIES = {
     "documents": "documents",
     "images": "images",
     "videos": "videos",
+    "audio": "audio",
 }
 
 # Allowed extensions categorized
@@ -31,6 +32,7 @@ ALLOWED_EXTENSIONS: Dict[str, Set[str]] = {
     "documents": {".pdf", ".docx", ".txt"},
     "images": {".png", ".jpg", ".jpeg", ".webp"},
     "videos": {".mp4", ".mov", ".avi", ".mkv", ".webm"},
+    "audio": {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"},
 }
 
 # Inverted mapping: extension -> category
@@ -53,6 +55,12 @@ ALLOWED_MIME_TYPES: Dict[str, str] = {
     ".avi": "video/x-msvideo",
     ".mkv": "video/x-matroska",
     ".webm": "video/webm",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
 }
 
 # Configurable size limits (in Megabytes)
@@ -61,6 +69,7 @@ DEFAULT_MAX_SIZES_MB = {
     "documents": int(os.getenv("MAX_DOC_SIZE_MB", "25")),
     "images": int(os.getenv("MAX_IMG_SIZE_MB", "15")),
     "videos": int(os.getenv("MAX_VID_SIZE_MB", "100")),
+    "audio": int(os.getenv("MAX_AUDIO_SIZE_MB", "50")),
     "global": int(os.getenv("MAX_GLOBAL_SIZE_MB", "150")),
 }
 

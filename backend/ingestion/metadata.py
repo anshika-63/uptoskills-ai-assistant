@@ -64,6 +64,25 @@ class MetadataManager:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_doc_timestamp ON document_metadata(upload_timestamp DESC);"
             )
+            # Create extraction table and index
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS document_extraction (
+                    document_id TEXT PRIMARY KEY,
+                    extraction_status TEXT NOT NULL,
+                    char_count INTEGER,
+                    word_count INTEGER,
+                    page_count INTEGER,
+                    extracted_at TEXT NOT NULL,
+                    extracted_json TEXT,
+                    error_message TEXT,
+                    FOREIGN KEY (document_id) REFERENCES document_metadata (document_id) ON DELETE CASCADE
+                );
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ext_status ON document_extraction(extraction_status);"
+            )
             conn.commit()
 
     def save(self, metadata: DocumentMetadata) -> bool:
@@ -173,7 +192,7 @@ class MetadataManager:
 
     def count_by_category(self) -> Dict[str, int]:
         """Returns document counts broken down by category."""
-        counts = {"documents": 0, "images": 0, "videos": 0}
+        counts = {"documents": 0, "images": 0, "videos": 0, "audio": 0}
         with self._get_connection() as conn:
             cursor = conn.execute(
                 "SELECT category, COUNT(*) as count FROM document_metadata GROUP BY category;"
@@ -189,12 +208,119 @@ class MetadataManager:
             cursor = conn.execute("SELECT COALESCE(SUM(file_size_bytes), 0) FROM document_metadata;")
             return cursor.fetchone()[0]
 
-    def delete(self, document_id: str) -> bool:
-        """Deletes document metadata record by ID."""
+    def save_extraction(
+        self,
+        document_id: str,
+        extraction_status: str,
+        extracted_content: Optional[dict] = None,
+        error_message: Optional[str] = None,
+        extracted_at: Optional[str] = None,
+    ) -> bool:
+        """
+        Saves or updates extraction results for a document in SQLite.
+        """
+        from datetime import datetime, timezone
+
+        if extracted_at is None:
+            extracted_at = datetime.now(timezone.utc).isoformat()
+
+        char_count = None
+        word_count = None
+        page_count = None
+        extracted_json = None
+
+        if extracted_content:
+            char_count = extracted_content.get("char_count")
+            if char_count is None and "raw_text" in extracted_content:
+                char_count = len(extracted_content["raw_text"])
+
+            word_count = extracted_content.get("word_count")
+            if word_count is None and extracted_content.get("raw_text"):
+                word_count = len(extracted_content["raw_text"].split())
+
+            page_count = extracted_content.get("total_pages")
+            if page_count is None and "pages" in extracted_content:
+                page_count = len(extracted_content["pages"])
+
+            try:
+                extracted_json = json.dumps(extracted_content)
+            except Exception:
+                extracted_json = None
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO document_extraction (
+                    document_id,
+                    extraction_status,
+                    char_count,
+                    word_count,
+                    page_count,
+                    extracted_at,
+                    extracted_json,
+                    error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    document_id,
+                    extraction_status,
+                    char_count,
+                    word_count,
+                    page_count,
+                    extracted_at,
+                    extracted_json,
+                    error_message,
+                ),
+            )
+            conn.commit()
+            return True
+
+    def get_extraction(self, document_id: str) -> Optional[dict]:
+        """
+        Retrieves the full extracted content dictionary for a document.
+        """
         with self._get_connection() as conn:
             cursor = conn.execute(
+                "SELECT extracted_json FROM document_extraction WHERE document_id = ? LIMIT 1;",
+                (document_id,),
+            )
+            row = cursor.fetchone()
+            if row and row["extracted_json"]:
+                try:
+                    return json.loads(row["extracted_json"])
+                except Exception:
+                    return None
+        return None
+
+    def get_extraction_stats(self, document_id: str) -> Optional[dict]:
+        """
+        Retrieves summary extraction metadata/stats for a document without loading the full JSON payload.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT extraction_status, char_count, word_count, page_count, extracted_at, error_message
+                FROM document_extraction
+                WHERE document_id = ?
+                LIMIT 1;
+                """,
+                (document_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+        return None
+
+    def delete(self, document_id: str) -> bool:
+        """Deletes document metadata and extraction records by ID."""
+        with self._get_connection() as conn:
+            cur_ext = conn.execute(
+                "DELETE FROM document_extraction WHERE document_id = ?;",
+                (document_id,),
+            )
+            cur_doc = conn.execute(
                 "DELETE FROM document_metadata WHERE document_id = ?;",
                 (document_id,),
             )
             conn.commit()
-            return cursor.rowcount > 0
+            return (cur_doc.rowcount > 0) or (cur_ext.rowcount > 0)
