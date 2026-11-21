@@ -55,7 +55,6 @@ class DocumentMetadata(BaseModel):
     metadata_json: Optional[str] = None
 
 
-
 class IngestionResult(BaseModel):
     """Final outcome of the ingestion pipeline for a single file."""
     success: bool

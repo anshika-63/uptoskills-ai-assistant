@@ -4,7 +4,10 @@ for the UpToSkills RAG Ingestion Pipeline tests.
 """
 
 import io
+import math
+import struct
 import sys
+import wave
 import zipfile
 from pathlib import Path
 import pytest
@@ -80,11 +83,39 @@ def create_sample_pdf() -> bytes:
 
 
 def create_sample_docx() -> bytes:
-    """Generates a valid minimalist DOCX zip buffer."""
+    """
+    Generates a *minimal* DOCX that passes format validation.
+    For extraction tests, use create_real_docx() which builds a fully
+    parseable document via python-docx.
+    """
     bio = io.BytesIO()
     with zipfile.ZipFile(bio, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types></Types>')
         zf.writestr("word/document.xml", '<?xml version="1.0" encoding="UTF-8"?><w:document></w:document>')
+    return bio.getvalue()
+
+
+def create_real_docx(paragraphs=None, tables=None) -> bytes:
+    """
+    Generates a fully parseable DOCX via python-docx.
+    paragraphs: list[str]  — text paragraphs to add
+    tables: list[list[list[str]]]  — table → rows → cells
+    """
+    from docx import Document as DocxDoc
+
+    doc = DocxDoc()
+    for p in (paragraphs or ["Sample paragraph for RAG extraction test."]):
+        doc.add_paragraph(p)
+    for tbl in (tables or []):
+        if not tbl:
+            continue
+        rows, cols = len(tbl), len(tbl[0])
+        word_table = doc.add_table(rows=rows, cols=cols)
+        for r_i, row_data in enumerate(tbl):
+            for c_i, cell_text in enumerate(row_data):
+                word_table.cell(r_i, c_i).text = cell_text
+    bio = io.BytesIO()
+    doc.save(bio)
     return bio.getvalue()
 
 
@@ -141,3 +172,50 @@ def create_sample_mkv() -> bytes:
 def create_sample_webm() -> bytes:
     """Generates a valid WebM EBML header buffer."""
     return b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\xf7\x81\x01\x42\xf2\x81\x04\x42\xf3\x81\x08\x42\x82\x84webm"
+
+
+# Audio Sample Generators
+def create_sample_wav(duration_s: float = 0.5, freq: float = 440.0, sample_rate: int = 16000) -> bytes:
+    """Generates a genuine 16kHz mono 16-bit PCM WAV audio buffer."""
+    bio = io.BytesIO()
+    with wave.open(bio, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        total_samples = int(sample_rate * duration_s)
+        frames = []
+        for i in range(total_samples):
+            val = int(32767.0 * 0.3 * math.sin(2.0 * math.pi * freq * i / sample_rate))
+            frames.append(struct.pack("<h", val))
+        wf.writeframes(b"".join(frames))
+    return bio.getvalue()
+
+
+def create_sample_mp3() -> bytes:
+    """Generates a valid MP3 buffer with ID3v2 header and MPEG audio frame sync."""
+    # ID3v2 header (10 bytes) + MPEG audio frame sync header (0xFFFB) + padding
+    id3 = b"ID3\x04\x00\x00\x00\x00\x00\x00"
+    mpeg_frame = b"\xff\xfb\x90\x64" + b"\x00" * 200
+    return id3 + mpeg_frame
+
+
+def create_sample_ogg() -> bytes:
+    """Generates a valid Ogg container buffer."""
+    return b"OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00" + b"\x00" * 100
+
+
+def create_sample_flac() -> bytes:
+    """Generates a valid FLAC stream header buffer."""
+    return b"fLaC\x00\x00\x00\x22" + b"\x00" * 100
+
+
+def create_sample_m4a() -> bytes:
+    """Generates a valid M4A ISO BMFF header buffer."""
+    return b"\x00\x00\x00\x1cftypM4A \x00\x00\x02\x00M4A mp42isom" + b"\x00" * 100
+
+
+def create_sample_aac() -> bytes:
+    """Generates a valid AAC ADTS stream header buffer."""
+    # ADTS sync word: 12 bits 0xFFF + layer/profile bits
+    return b"\xff\xf1\x50\x80\x01\x20\x00" + b"\x00" * 100
+

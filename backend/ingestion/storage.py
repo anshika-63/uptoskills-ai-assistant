@@ -4,25 +4,37 @@ Responsible for generating unique document IDs, directory creation,
 categorized file persistence, and accidental overwrite prevention.
 """
 
+import json
 import os
 import time
 import uuid
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
-from backend.config import CATEGORY_DIRECTORIES, STORAGE_BASE_DIR
+from backend.config import CATEGORY_DIRECTORIES, STORAGE_BASE_DIR, TRANSCRIPTS_DIR
 
 
 class StorageManager:
     """Manages persistent disk storage for validated documents."""
 
-    def __init__(self, base_dir: Optional[Union[str, Path]] = None):
+    def __init__(
+        self,
+        base_dir: Optional[Union[str, Path]] = None,
+        transcripts_dir: Optional[Union[str, Path]] = None,
+    ):
         self.base_dir = Path(base_dir or STORAGE_BASE_DIR).resolve()
+        if transcripts_dir:
+            self.transcripts_dir = Path(transcripts_dir).resolve()
+        elif base_dir:
+            self.transcripts_dir = (self.base_dir.parent / "transcripts").resolve()
+        else:
+            self.transcripts_dir = Path(TRANSCRIPTS_DIR).resolve()
         self._ensure_storage_structure()
 
     def _ensure_storage_structure(self) -> None:
-        """Creates the root and category directories if they do not exist."""
+        """Creates the root, category, and transcript directories if they do not exist."""
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.transcripts_dir.mkdir(parents=True, exist_ok=True)
         for cat_dir in CATEGORY_DIRECTORIES.values():
             (self.base_dir / cat_dir).mkdir(parents=True, exist_ok=True)
 
@@ -107,3 +119,34 @@ class StorageManager:
             p.unlink()
             return True
         return False
+
+    def save_transcript_json(
+        self,
+        document_id: str,
+        transcript_data: Dict[str, Any],
+    ) -> Tuple[Path, str]:
+        """
+        Persistently saves audio transcript JSON to transcripts directory.
+        Returns (absolute_file_path, relative_storage_path).
+        """
+        self.transcripts_dir.mkdir(parents=True, exist_ok=True)
+        target_path = self.transcripts_dir / f"{document_id}.json"
+        with open(target_path, "w", encoding="utf-8") as f:
+            json.dump(transcript_data, f, ensure_ascii=False, indent=2)
+
+        try:
+            rel_path = str(target_path.relative_to(self.base_dir.parent)).replace("\\", "/")
+        except ValueError:
+            try:
+                rel_path = str(target_path.relative_to(self.base_dir)).replace("\\", "/")
+            except ValueError:
+                rel_path = str(target_path).replace("\\", "/")
+        return target_path, rel_path
+
+    def get_transcript_json(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """Reads transcript JSON from disk if it exists."""
+        target_path = self.transcripts_dir / f"{document_id}.json"
+        if target_path.exists() and target_path.is_file():
+            with open(target_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return None

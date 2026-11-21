@@ -15,9 +15,13 @@ PROJECT_ROOT = BACKEND_DIR.parent
 # Storage configuration
 DEFAULT_STORAGE_DIR = BACKEND_DIR / "storage" / "uploads"
 DEFAULT_DB_PATH = BACKEND_DIR / "storage" / "metadata.db"
+DEFAULT_EXTRACTED_DIR = BACKEND_DIR / "storage" / "extracted"
+DEFAULT_TRANSCRIPTS_DIR = BACKEND_DIR / "storage" / "transcripts"
 
 STORAGE_BASE_DIR = Path(os.getenv("RAG_STORAGE_DIR", str(DEFAULT_STORAGE_DIR)))
 METADATA_DB_PATH = Path(os.getenv("RAG_METADATA_DB_PATH", str(DEFAULT_DB_PATH)))
+EXTRACTED_DIR = Path(os.getenv("RAG_EXTRACTED_DIR", str(DEFAULT_EXTRACTED_DIR)))
+TRANSCRIPTS_DIR = Path(os.getenv("RAG_TRANSCRIPTS_DIR", str(DEFAULT_TRANSCRIPTS_DIR)))
 
 # Category-specific directory mappings
 CATEGORY_DIRECTORIES = {
@@ -80,3 +84,8 @@ MAX_SIZES_BYTES = {
 
 # Enable or disable duplicate detection
 ENABLE_DUPLICATE_DETECTION = os.getenv("ENABLE_DUPLICATE_DETECTION", "true").lower() in ("true", "1", "yes")
+
+# Whisper Speech-to-Text configuration
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "tiny")
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")

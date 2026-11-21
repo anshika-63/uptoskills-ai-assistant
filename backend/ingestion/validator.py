@@ -202,38 +202,50 @@ class FileValidator:
                 return True, expected_mime, None
 
             elif ext == ".mp3":
-                # Check for ID3 tag or MPEG frame sync header (11 sync bits: 0xFF followed by 0xE0 mask)
-                is_id3 = content.startswith(b"ID3")
-                is_sync = len(content) >= 2 and content[0] == 0xFF and (content[1] & 0xE0) == 0xE0
-                if not (is_id3 or is_sync):
-                    return False, None, "Corrupted MP3: missing ID3 or MPEG frame sync header."
+                # Check for ID3v2 tag or MPEG sync word (0xFFE0 / 0xFFFB etc.)
+                has_id3 = content.startswith(b"ID3")
+                has_sync = (
+                    len(content) >= 2
+                    and content[0] == 0xFF
+                    and (content[1] & 0xE0) == 0xE0
+                )
+                has_id3_or_sync_in_prefix = (
+                    b"ID3" in content[:1024]
+                    or any(content[i:i+2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2", b"\xff\xfa") for i in range(min(512, len(content) - 1)))
+                )
+                if not (has_id3 or has_sync or has_id3_or_sync_in_prefix):
+                    return False, None, "Corrupted MP3: missing ID3 tag or MPEG audio sync header."
                 return True, expected_mime, None
 
             elif ext == ".wav":
                 if not (content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WAVE"):
-                    return False, None, "Corrupted WAV: missing RIFF/WAVE header signature."
-                return True, expected_mime, None
-
-            elif ext == ".flac":
-                if not content.startswith(b"fLaC"):
-                    return False, None, "Corrupted FLAC: missing 'fLaC' marker."
+                    return False, None, "Corrupted WAV: missing RIFF/WAVE header chunk."
                 return True, expected_mime, None
 
             elif ext == ".ogg":
                 if not content.startswith(b"OggS"):
-                    return False, None, "Corrupted OGG: missing 'OggS' capture pattern."
+                    return False, None, "Corrupted OGG: missing 'OggS' container signature."
+                return True, expected_mime, None
+
+            elif ext == ".flac":
+                if not content.startswith(b"fLaC"):
+                    return False, None, "Corrupted FLAC: missing 'fLaC' stream marker."
                 return True, expected_mime, None
 
             elif ext == ".m4a":
-                if not (len(content) >= 12 and content[4:8] == b"ftyp"):
-                    return False, None, "Corrupted M4A: missing ISO/M4A 'ftyp' box."
+                if len(content) < 12 or content[4:8] != b"ftyp":
+                    return False, None, "Corrupted M4A: missing 'ftyp' audio container atom."
                 return True, expected_mime, None
 
             elif ext == ".aac":
-                is_adts = len(content) >= 2 and content[0] == 0xFF and (content[1] & 0xF0) == 0xF0
-                is_id3 = content.startswith(b"ID3")
-                if not (is_adts or is_id3):
-                    return False, None, "Corrupted AAC: missing ADTS syncword or ID3 header."
+                has_id3 = content.startswith(b"ID3")
+                has_adts = (
+                    len(content) >= 2
+                    and content[0] == 0xFF
+                    and (content[1] & 0xF0) == 0xF0
+                )
+                if not (has_id3 or has_adts):
+                    return False, None, "Corrupted AAC: missing ADTS sync word or ID3 tag."
                 return True, expected_mime, None
 
             else:

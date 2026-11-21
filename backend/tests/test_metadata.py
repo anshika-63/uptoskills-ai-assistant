@@ -109,6 +109,7 @@ def test_metadata_aggregations(metadata_manager):
     assert counts["documents"] == 2
     assert counts["images"] == 1
     assert counts["videos"] == 0
+    assert counts["audio"] == 0
 
     assert metadata_manager.get_total_storage_bytes() == 8000
 

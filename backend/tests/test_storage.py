@@ -12,6 +12,7 @@ def test_storage_init_creates_directories(temp_storage_dir):
     assert (temp_storage_dir / "documents").exists()
     assert (temp_storage_dir / "images").exists()
     assert (temp_storage_dir / "videos").exists()
+    assert (temp_storage_dir / "audio").exists()
 
 
 def test_generate_document_id():
@@ -87,3 +88,27 @@ def test_file_exists_read_and_delete(storage_manager):
     deleted = storage_manager.delete_file(rel_path)
     assert deleted
     assert not storage_manager.file_exists(rel_path)
+
+
+def test_save_and_get_transcript_json(storage_manager):
+    doc_id = storage_manager.generate_document_id()
+    sample_data = {
+        "document_id": doc_id,
+        "raw_text": "Sample transcription test",
+        "duration": 5.0,
+        "segments": [{"id": 0, "start": 0.0, "end": 5.0, "text": "Sample transcription test", "timestamp": "[00:00.00 -> 00:05.00]"}],
+    }
+
+    abs_path, rel_path = storage_manager.save_transcript_json(doc_id, sample_data)
+    assert abs_path.exists()
+    assert abs_path.name == f"{doc_id}.json"
+
+    retrieved = storage_manager.get_transcript_json(doc_id)
+    assert retrieved is not None
+    assert retrieved["document_id"] == doc_id
+    assert retrieved["raw_text"] == "Sample transcription test"
+    assert len(retrieved["segments"]) == 1
+
+    # Non-existent document
+    assert storage_manager.get_transcript_json("doc_nonexistent") is None
+
