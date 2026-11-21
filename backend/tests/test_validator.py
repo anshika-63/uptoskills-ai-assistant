@@ -7,15 +7,21 @@ empty/corrupted file detection, and signature validation.
 from backend.ingestion.models import ValidationStatus
 from backend.ingestion.validator import FileValidator
 from backend.tests.conftest import (
+    create_sample_aac,
     create_sample_avi,
     create_sample_docx,
+    create_sample_flac,
     create_sample_jpeg,
+    create_sample_m4a,
     create_sample_mkv,
     create_sample_mov,
+    create_sample_mp3,
     create_sample_mp4,
+    create_sample_ogg,
     create_sample_pdf,
     create_sample_png,
     create_sample_txt,
+    create_sample_wav,
     create_sample_webm,
     create_sample_webp,
 )
@@ -73,6 +79,12 @@ def test_category_detection(validator):
     assert validator.get_category_for_extension(".avi") == "videos"
     assert validator.get_category_for_extension(".mkv") == "videos"
     assert validator.get_category_for_extension(".webm") == "videos"
+    assert validator.get_category_for_extension(".mp3") == "audio"
+    assert validator.get_category_for_extension(".wav") == "audio"
+    assert validator.get_category_for_extension(".m4a") == "audio"
+    assert validator.get_category_for_extension(".aac") == "audio"
+    assert validator.get_category_for_extension(".ogg") == "audio"
+    assert validator.get_category_for_extension(".flac") == "audio"
     assert validator.get_category_for_extension(".exe") is None
 
 
@@ -202,6 +214,71 @@ def test_validate_corrupted_video_rejected(validator):
     res = validator.validate("bad.mp4", b"\x00\x00\x00\x10fakevideoheader")
     assert not res.is_valid
     assert "corrupted mp4" in res.error_message.lower()
+
+
+def test_validate_valid_audio(validator):
+    # WAV
+    wav_res = validator.validate("sound.wav", create_sample_wav())
+    assert wav_res.is_valid
+    assert wav_res.category == "audio"
+    assert wav_res.file_type == ".wav"
+
+    # MP3
+    mp3_res = validator.validate("track.mp3", create_sample_mp3())
+    assert mp3_res.is_valid
+    assert mp3_res.category == "audio"
+
+    # OGG
+    ogg_res = validator.validate("track.ogg", create_sample_ogg())
+    assert ogg_res.is_valid
+    assert ogg_res.category == "audio"
+
+    # FLAC
+    flac_res = validator.validate("track.flac", create_sample_flac())
+    assert flac_res.is_valid
+    assert flac_res.category == "audio"
+
+    # M4A
+    m4a_res = validator.validate("voice.m4a", create_sample_m4a())
+    assert m4a_res.is_valid
+    assert m4a_res.category == "audio"
+
+    # AAC
+    aac_res = validator.validate("voice.aac", create_sample_aac())
+    assert aac_res.is_valid
+    assert aac_res.category == "audio"
+
+
+def test_validate_corrupted_audio_rejected(validator):
+    # Fake MP3
+    bad_mp3 = validator.validate("fake.mp3", b"RIFFNOTANMP3FILECONTENT")
+    assert not bad_mp3.is_valid
+    assert "corrupted mp3" in bad_mp3.error_message.lower()
+
+    # Fake WAV
+    bad_wav = validator.validate("fake.wav", b"RIFF\x20\x00\x00\x00NOTWAVECHUNK")
+    assert not bad_wav.is_valid
+    assert "corrupted wav" in bad_wav.error_message.lower()
+
+    # Fake OGG
+    bad_ogg = validator.validate("fake.ogg", b"NOTOGGSHEADER")
+    assert not bad_ogg.is_valid
+    assert "corrupted ogg" in bad_ogg.error_message.lower()
+
+    # Fake FLAC
+    bad_flac = validator.validate("fake.flac", b"NOTFLACHEADER")
+    assert not bad_flac.is_valid
+    assert "corrupted flac" in bad_flac.error_message.lower()
+
+    # Fake M4A
+    bad_m4a = validator.validate("fake.m4a", b"\x00\x00\x00\x10notanm4afile")
+    assert not bad_m4a.is_valid
+    assert "corrupted m4a" in bad_m4a.error_message.lower()
+
+    # Fake AAC
+    bad_aac = validator.validate("fake.aac", b"NOTANAACHEADER")
+    assert not bad_aac.is_valid
+    assert "corrupted aac" in bad_aac.error_message.lower()
 
 
 def test_sha256_computation():

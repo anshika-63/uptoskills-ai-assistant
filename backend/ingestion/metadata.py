@@ -2,15 +2,24 @@
 Metadata management engine for the RAG document ingestion pipeline.
 Provides persistent storage, retrieval, indexing, duplicate detection,
 and aggregation using SQLite.
+
+Two tables are managed here:
+  - document_metadata : file-level record (upload status, hashes, paths).
+  - document_extraction: extracted text payload persisted as JSON alongside
+    summary statistics. Query modules access extraction via get_extraction().
 """
 
 import json
+import logging
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from backend.config import METADATA_DB_PATH
 from backend.ingestion.models import DocumentMetadata
+
+logger = logging.getLogger("rag.metadata")
 
 
 class MetadataManager:
@@ -64,7 +73,141 @@ class MetadataManager:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_doc_timestamp ON document_metadata(upload_timestamp DESC);"
             )
+
+            # Extraction persistence table (created alongside document_metadata
+            # so the same DB file covers both upload and extraction state).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS document_extraction (
+                    document_id       TEXT PRIMARY KEY,
+                    file_type         TEXT NOT NULL,
+                    raw_text          TEXT NOT NULL DEFAULT '',
+                    char_count        INTEGER NOT NULL DEFAULT 0,
+                    word_count        INTEGER NOT NULL DEFAULT 0,
+                    page_count        INTEGER NOT NULL DEFAULT 0,
+                    extraction_status TEXT NOT NULL DEFAULT 'success',
+                    extracted_at      TEXT NOT NULL,
+                    payload_json      TEXT NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ext_id ON document_extraction(document_id);"
+            )
             conn.commit()
+
+    # ------------------------------------------------------------------
+    # Extraction persistence helpers
+    # ------------------------------------------------------------------
+
+    def save_extraction(
+        self,
+        document_id: str,
+        extraction: Dict[str, Any],
+        extraction_status: str = "success",
+    ) -> bool:
+        """
+        Persist the full extraction payload for a document.
+
+        Args:
+            document_id: ID of the parent document record.
+            extraction:  Dict returned by text_extractor.extract_text().
+            extraction_status: 'success' or 'failed'.
+
+        The payload is stored as JSON in `payload_json`.  Key statistics
+        (raw_text, char_count, word_count, page_count) are promoted to
+        dedicated columns so they can be queried without deserialising JSON.
+
+        Returns True on success.
+        """
+        file_type   = extraction.get("file_type", "")
+        raw_text    = extraction.get("raw_text", "")
+        char_count  = extraction.get("char_count", len(raw_text))
+        word_count  = extraction.get("word_count", len(raw_text.split()) if raw_text else 0)
+        page_count  = extraction.get("total_pages", 1 if file_type != "pdf" else 0)
+        extracted_at = datetime.now(timezone.utc).isoformat()
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO document_extraction (
+                    document_id, file_type, raw_text, char_count, word_count,
+                    page_count, extraction_status, extracted_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    document_id,
+                    file_type,
+                    raw_text,
+                    char_count,
+                    word_count,
+                    page_count,
+                    extraction_status,
+                    extracted_at,
+                    json.dumps(extraction, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        logger.info(
+            "Extraction saved: doc_id=%s file_type=%s chars=%d words=%d",
+            document_id, file_type, char_count, word_count,
+        )
+        return True
+
+    def get_extraction(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve the persisted extraction payload for a document.
+
+        Returns the full deserialized dict (as returned by extract_text())
+        or None if no extraction record exists yet.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT payload_json, extraction_status FROM document_extraction "
+                "WHERE document_id = ? LIMIT 1;",
+                (document_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return json.loads(row["payload_json"])
+        return None
+
+    def extraction_exists(self, document_id: str) -> bool:
+        """Returns True when a successful extraction record is stored."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT 1 FROM document_extraction "
+                "WHERE document_id = ? AND extraction_status = 'success' LIMIT 1;",
+                (document_id,),
+            )
+            return cursor.fetchone() is not None
+
+    def get_extraction_stats(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Returns lightweight extraction statistics (no raw_text) for a document.
+        Useful for dashboard display without loading full text into memory.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT file_type, char_count, word_count, page_count, "
+                "extraction_status, extracted_at "
+                "FROM document_extraction WHERE document_id = ? LIMIT 1;",
+                (document_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+        return None
+
+    def delete_extraction(self, document_id: str) -> bool:
+        """Deletes the extraction record for a document."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM document_extraction WHERE document_id = ?;",
+                (document_id,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def save(self, metadata: DocumentMetadata) -> bool:
         """
@@ -173,7 +316,7 @@ class MetadataManager:
 
     def count_by_category(self) -> Dict[str, int]:
         """Returns document counts broken down by category."""
-        counts = {"documents": 0, "images": 0, "videos": 0}
+        counts = {"documents": 0, "images": 0, "videos": 0, "audio": 0}
         with self._get_connection() as conn:
             cursor = conn.execute(
                 "SELECT category, COUNT(*) as count FROM document_metadata GROUP BY category;"

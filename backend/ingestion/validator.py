@@ -201,6 +201,53 @@ class FileValidator:
                     return False, None, f"Corrupted {ext[1:].upper()}: missing EBML signature."
                 return True, expected_mime, None
 
+            elif ext == ".mp3":
+                # Check for ID3v2 tag or MPEG sync word (0xFFE0 / 0xFFFB etc.)
+                has_id3 = content.startswith(b"ID3")
+                has_sync = (
+                    len(content) >= 2
+                    and content[0] == 0xFF
+                    and (content[1] & 0xE0) == 0xE0
+                )
+                has_id3_or_sync_in_prefix = (
+                    b"ID3" in content[:1024]
+                    or any(content[i:i+2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2", b"\xff\xfa") for i in range(min(512, len(content) - 1)))
+                )
+                if not (has_id3 or has_sync or has_id3_or_sync_in_prefix):
+                    return False, None, "Corrupted MP3: missing ID3 tag or MPEG audio sync header."
+                return True, expected_mime, None
+
+            elif ext == ".wav":
+                if not (content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WAVE"):
+                    return False, None, "Corrupted WAV: missing RIFF/WAVE header chunk."
+                return True, expected_mime, None
+
+            elif ext == ".ogg":
+                if not content.startswith(b"OggS"):
+                    return False, None, "Corrupted OGG: missing 'OggS' container signature."
+                return True, expected_mime, None
+
+            elif ext == ".flac":
+                if not content.startswith(b"fLaC"):
+                    return False, None, "Corrupted FLAC: missing 'fLaC' stream marker."
+                return True, expected_mime, None
+
+            elif ext == ".m4a":
+                if len(content) < 12 or content[4:8] != b"ftyp":
+                    return False, None, "Corrupted M4A: missing 'ftyp' audio container atom."
+                return True, expected_mime, None
+
+            elif ext == ".aac":
+                has_id3 = content.startswith(b"ID3")
+                has_adts = (
+                    len(content) >= 2
+                    and content[0] == 0xFF
+                    and (content[1] & 0xF0) == 0xF0
+                )
+                if not (has_id3 or has_adts):
+                    return False, None, "Corrupted AAC: missing ADTS sync word or ID3 tag."
+                return True, expected_mime, None
+
             else:
                 return False, None, f"Unsupported file extension: {ext}"
 
