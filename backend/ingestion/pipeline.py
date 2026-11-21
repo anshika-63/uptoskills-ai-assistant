@@ -1,7 +1,7 @@
 """
 Ingestion Pipeline Orchestrator for UpToSkills AI Assistant.
 Coordinates file validation, SHA-256 duplicate detection,
-persistent categorized storage, metadata recording, and text extraction.
+persistent categorized storage, metadata recording, and text/audio extraction.
 
 Step order (new files):
   1. Validate format, size, header / corruption, sanitize filename.
@@ -9,16 +9,17 @@ Step order (new files):
      any existing persisted extraction so the caller never sees "no data".
   3. Store validated file bytes to categorized directory.
   4. Save document metadata row to SQLite (status='stored').
-  5. Run text extraction for PDF/DOCX/TXT; persist result via
-     MetadataManager.save_extraction(); update metadata status.
-  6. Return IngestionResult with separate upload_success and extraction_status.
+  5. Run text extraction for PDF/DOCX/TXT or audio transcription;
+     persist result via MetadataManager.save_extraction(); update metadata status.
+  6. Preprocess and chunk extracted content with token estimation.
+  7. Return IngestionResult with separate upload_success and extraction_status.
 """
 
 import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from backend.config import ENABLE_DUPLICATE_DETECTION
 from backend.ingestion.audio_transcriber import AUDIO_EXTENSIONS, transcribe_audio
@@ -28,6 +29,13 @@ from backend.ingestion.models import (
     IngestionResult,
     ValidationResult,
     ValidationStatus,
+)
+from backend.ingestion.preprocessing import (
+    attach_chunk_metadata,
+    preprocess_text,
+    recursive_chunking,
+    remove_repeated_headers_footers,
+    verify_chunk_tokens,
 )
 from backend.ingestion.storage import StorageManager
 from backend.ingestion.text_extractor import EXTRACTABLE_EXTENSIONS, extract_text
@@ -57,7 +65,15 @@ class IngestionPipeline:
 
     def process_file(self, filename: str, content: bytes) -> IngestionResult:
         """
-        Full ingestion for a single uploaded file.
+        Executes ingestion for a single file:
+        1. Validates format, size, header/corruption, and sanitizes filename.
+        2. Detects duplicates via SHA-256 hash. On duplicate, retrieves existing
+           extraction so the caller never sees "no data".
+        3. Persists file to category storage folder.
+        4. Saves persistent metadata to SQLite.
+        5. Extracts text (PDF, DOCX, TXT) or transcribes audio; persists result.
+        6. Preprocesses and chunks content with token estimation.
+        7. Returns IngestionResult with separate upload_success and extraction_status.
 
         Returns an IngestionResult with:
           - success         : True when file was stored (new) or is a known dup.
@@ -73,8 +89,8 @@ class IngestionPipeline:
             return IngestionResult(
                 success=False,
                 upload_success=False,
-                validation_result=validation_res,
                 extraction_status="not_applicable",
+                validation_result=validation_res,
                 message=validation_res.error_message or "Validation failed.",
             )
 
@@ -138,6 +154,83 @@ class IngestionPipeline:
 
         self.metadata.save(meta)
 
+        # ── Step 6: Preprocessing and Chunking ────────────────────────────
+        preprocessed_content: List[Any] = []
+        suffix = abs_path.suffix.lower()
+
+        if extracted_content:
+            file_type = extracted_content.get("file_type", "")
+
+            if file_type == "pdf":
+                pages = remove_repeated_headers_footers(
+                    extracted_content.get("pages", [])
+                )
+                all_chunks: List[Dict[str, Any]] = []
+                for page in pages:
+                    text = preprocess_text(page.get("text", ""))
+                    if text:
+                        chunks = recursive_chunking(text)
+                        for chunk in chunks:
+                            all_chunks.append({
+                                "text": chunk,
+                                "page_number": page.get("page_number"),
+                            })
+
+                if all_chunks:
+                    chunks_only = [item["text"] for item in all_chunks]
+                    preprocessed_content = attach_chunk_metadata(
+                        chunks_only, doc_id, filename, file_type
+                    )
+                    for index, chunk in enumerate(preprocessed_content):
+                        chunk["chunk_index"] = index
+                        chunk["page_number"] = all_chunks[index]["page_number"]
+
+            elif file_type == "docx":
+                text_parts = extracted_content.get("paragraphs", [])
+                table_parts: List[str] = []
+                for t_idx, table in enumerate(extracted_content.get("tables", []), start=1):
+                    if isinstance(table, list):
+                        for row_index, row in enumerate(table, start=1):
+                            if isinstance(row, list):
+                                row_text = " | ".join(str(cell).strip() for cell in row if str(cell).strip())
+                            else:
+                                row_text = str(row).strip()
+                            if row_text:
+                                table_parts.append(f"Table {t_idx} Row {row_index}: {row_text}")
+
+                combined_text = "\n".join(text_parts)
+                if table_parts:
+                    combined_text += "\n\n" + "\n".join(table_parts)
+
+                text = preprocess_text(combined_text)
+                if text:
+                    chunks = recursive_chunking(text)
+                    preprocessed_content = attach_chunk_metadata(
+                        chunks, doc_id, filename, file_type
+                    )
+
+            elif file_type in ("txt", "image", "video"):
+                raw_text = extracted_content.get("raw_text") or extracted_content.get("text", "")
+                text = preprocess_text(raw_text)
+                if text:
+                    chunks = recursive_chunking(text)
+                    preprocessed_content = attach_chunk_metadata(
+                        chunks, doc_id, filename, file_type
+                    )
+
+            elif file_type == "audio" or extracted_content.get("category") == "audio" or suffix in AUDIO_EXTENSIONS:
+                raw_text = extracted_content.get("raw_text", "")
+                text = preprocess_text(raw_text)
+                if text:
+                    chunks = recursive_chunking(text)
+                    preprocessed_content = attach_chunk_metadata(
+                        chunks, doc_id, filename, "audio"
+                    )
+
+        # ── Step 7: Verify chunk token limits ─────────────────────────────
+        if preprocessed_content:
+            preprocessed_content = verify_chunk_tokens(preprocessed_content)
+
         return IngestionResult(
             success=True,
             upload_success=True,
@@ -147,6 +240,7 @@ class IngestionPipeline:
             extracted_content=extracted_content,
             extraction_error=extraction_error,
             extraction_status=extraction_status,
+            preprocessed_content=preprocessed_content,
             message="Document successfully validated, stored, and processed.",
         )
 
@@ -331,4 +425,3 @@ class IngestionPipeline:
                 return None, error_msg, "failed"
 
         return None, None, "not_applicable"
-

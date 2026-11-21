@@ -76,25 +76,43 @@ class MetadataManager:
 
             # Extraction persistence table (created alongside document_metadata
             # so the same DB file covers both upload and extraction state).
+            # Merged schema: HEAD columns + origin/main error_message column.
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS document_extraction (
                     document_id       TEXT PRIMARY KEY,
-                    file_type         TEXT NOT NULL,
+                    file_type         TEXT NOT NULL DEFAULT '',
                     raw_text          TEXT NOT NULL DEFAULT '',
                     char_count        INTEGER NOT NULL DEFAULT 0,
                     word_count        INTEGER NOT NULL DEFAULT 0,
                     page_count        INTEGER NOT NULL DEFAULT 0,
                     extraction_status TEXT NOT NULL DEFAULT 'success',
                     extracted_at      TEXT NOT NULL,
-                    payload_json      TEXT NOT NULL
+                    payload_json      TEXT,
+                    error_message     TEXT
                 );
                 """
             )
+            # Two indexes: one for fast ID look-up, one for status-based queries
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_ext_id ON document_extraction(document_id);"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ext_status ON document_extraction(extraction_status);"
+            )
             conn.commit()
+
+        # Schema migration: add error_message column if upgrading from older DB
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "ALTER TABLE document_extraction ADD COLUMN error_message TEXT;"
+                )
+                conn.commit()
+                logger.info("DB migration: added error_message column to document_extraction.")
+        except Exception:
+            # Column already exists (OperationalError) — safe to ignore
+            pass
 
     # ------------------------------------------------------------------
     # Extraction persistence helpers
@@ -103,16 +121,20 @@ class MetadataManager:
     def save_extraction(
         self,
         document_id: str,
-        extraction: Dict[str, Any],
+        extraction: Union[Dict[str, Any], str, None] = None,
         extraction_status: str = "success",
+        extracted_content: Optional[Dict[str, Any]] = None,
+        error_message: Optional[str] = None,
+        extracted_at: Optional[str] = None,
     ) -> bool:
         """
         Persist the full extraction payload for a document.
 
-        Args:
-            document_id: ID of the parent document record.
-            extraction:  Dict returned by text_extractor.extract_text().
-            extraction_status: 'success' or 'failed'.
+        Accepts two calling conventions to stay compatible with both pipeline
+        versions that emerged from the merge:
+
+          HEAD style   : save_extraction(doc_id, extraction_dict, extraction_status="success")
+          origin/main  : save_extraction(doc_id, "success", extracted_content=res, error_message=err)
 
         The payload is stored as JSON in `payload_json`.  Key statistics
         (raw_text, char_count, word_count, page_count) are promoted to
@@ -120,20 +142,47 @@ class MetadataManager:
 
         Returns True on success.
         """
-        file_type   = extraction.get("file_type", "")
-        raw_text    = extraction.get("raw_text", "")
-        char_count  = extraction.get("char_count", len(raw_text))
-        word_count  = extraction.get("word_count", len(raw_text.split()) if raw_text else 0)
-        page_count  = extraction.get("total_pages", 1 if file_type != "pdf" else 0)
-        extracted_at = datetime.now(timezone.utc).isoformat()
+        # Detect calling convention:
+        #   origin/main style : save_extraction(doc_id, "success", extracted_content=res)
+        #                       second arg is the status string
+        #   HEAD style        : save_extraction(doc_id, extraction_dict, extraction_status="success")
+        #                       second arg is the dict
+        #   keyword-only      : save_extraction(document_id=doc_id, extraction_status="success",
+        #                                       extracted_content=res)
+        #                       extraction is None; status comes from extraction_status kwarg
+        if extraction is None:
+            # Keyword-only call: use extraction_status kwarg + extracted_content kwarg
+            effective_status = extraction_status
+            effective_dict = extracted_content or {}
+        elif isinstance(extraction, str):
+            # origin/main style: second arg is the status string
+            effective_status = extraction
+            effective_dict = extracted_content or {}
+        else:
+            # HEAD style: second arg is the extraction dict
+            effective_status = extraction_status
+            effective_dict = extraction
+
+        effective_dict = effective_dict or {}
+        file_type   = effective_dict.get("file_type", "")
+        raw_text    = effective_dict.get("raw_text", "")
+        char_count  = effective_dict.get("char_count", len(raw_text) if raw_text else 0)
+        word_count  = effective_dict.get("word_count", len(raw_text.split()) if raw_text else 0)
+        page_count  = effective_dict.get("total_pages", 1 if file_type not in ("pdf", "") else 0)
+        ts = extracted_at or datetime.now(timezone.utc).isoformat()
+
+        try:
+            payload = json.dumps(effective_dict, ensure_ascii=False) if effective_dict else None
+        except Exception:
+            payload = None
 
         with self._get_connection() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO document_extraction (
                     document_id, file_type, raw_text, char_count, word_count,
-                    page_count, extraction_status, extracted_at, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    page_count, extraction_status, extracted_at, payload_json, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     document_id,
@@ -142,15 +191,16 @@ class MetadataManager:
                     char_count,
                     word_count,
                     page_count,
-                    extraction_status,
-                    extracted_at,
-                    json.dumps(extraction, ensure_ascii=False),
+                    effective_status,
+                    ts,
+                    payload,
+                    error_message,
                 ),
             )
             conn.commit()
         logger.info(
-            "Extraction saved: doc_id=%s file_type=%s chars=%d words=%d",
-            document_id, file_type, char_count, word_count,
+            "Extraction saved: doc_id=%s file_type=%s status=%s chars=%d words=%d",
+            document_id, file_type, effective_status, char_count, word_count,
         )
         return True
 
@@ -168,8 +218,11 @@ class MetadataManager:
                 (document_id,),
             )
             row = cursor.fetchone()
-            if row:
-                return json.loads(row["payload_json"])
+            if row and row["payload_json"]:
+                try:
+                    return json.loads(row["payload_json"])
+                except Exception:
+                    return None
         return None
 
     def extraction_exists(self, document_id: str) -> bool:
@@ -190,7 +243,7 @@ class MetadataManager:
         with self._get_connection() as conn:
             cursor = conn.execute(
                 "SELECT file_type, char_count, word_count, page_count, "
-                "extraction_status, extracted_at "
+                "extraction_status, extracted_at, error_message "
                 "FROM document_extraction WHERE document_id = ? LIMIT 1;",
                 (document_id,),
             )
@@ -333,11 +386,15 @@ class MetadataManager:
             return cursor.fetchone()[0]
 
     def delete(self, document_id: str) -> bool:
-        """Deletes document metadata record by ID."""
+        """Deletes document metadata and extraction records by ID."""
         with self._get_connection() as conn:
-            cursor = conn.execute(
+            cur_ext = conn.execute(
+                "DELETE FROM document_extraction WHERE document_id = ?;",
+                (document_id,),
+            )
+            cur_doc = conn.execute(
                 "DELETE FROM document_metadata WHERE document_id = ?;",
                 (document_id,),
             )
             conn.commit()
-            return cursor.rowcount > 0
+            return (cur_doc.rowcount > 0) or (cur_ext.rowcount > 0)
