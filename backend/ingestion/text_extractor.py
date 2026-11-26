@@ -17,14 +17,18 @@ Design rules:
 """
 
 import logging
+import os
+import shutil
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 logger = logging.getLogger("rag.extraction")
 
 import pymupdf
 from docx import Document
+
+from backend.config import BACKEND_DIR, PROJECT_ROOT, TESSERACT_CMD, resolve_tesseract_cmd
 
 # Optional OCR / vision dependencies — degrade gracefully if not installed
 try:
@@ -44,8 +48,215 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# OCR Engine Management & Helpers
+# ---------------------------------------------------------------------------
+
+_CUSTOM_OCR_FUNC: Optional[Callable[[Any], str]] = None
+
+
+def set_ocr_engine(func: Optional[Callable[[Any], str]]) -> None:
+    """Sets a custom OCR callable (image -> text) for testing or alternate OCR backends."""
+    global _CUSTOM_OCR_FUNC
+    _CUSTOM_OCR_FUNC = func
+
+
+def reset_ocr_engine() -> None:
+    """Resets the OCR engine to default pytesseract."""
+    global _CUSTOM_OCR_FUNC
+    _CUSTOM_OCR_FUNC = None
+
+
+def get_tesseract_cmd() -> Optional[str]:
+    """
+    Resolves the executable path to Tesseract OCR.
+    Prioritizes dynamic env/config, already-configured pytesseract,
+    system PATH, and standard Windows install locations.
+    """
+    # 1. Check environment variable dynamically or config setting
+    configured = (
+        os.getenv("TESSERACT_CMD", "").strip("\"' ")
+        or resolve_tesseract_cmd()
+        or TESSERACT_CMD
+    )
+    if configured:
+        cand = Path(configured)
+        if cand.is_file():
+            return str(cand.resolve())
+        # Try relative to known base paths
+        for base in (PROJECT_ROOT, BACKEND_DIR, PROJECT_ROOT.parent, Path.cwd()):
+            resolved = (base / configured).resolve()
+            if resolved.is_file():
+                return str(resolved)
+
+    # 2. Existing pytesseract configuration if valid
+    if _OCR_AVAILABLE and hasattr(pytesseract, "pytesseract") and pytesseract.pytesseract.tesseract_cmd:
+        cmd = pytesseract.pytesseract.tesseract_cmd
+        if cmd != "tesseract" and Path(cmd).is_file():
+            return str(Path(cmd).resolve())
+
+    # 3. System PATH
+    which_path = shutil.which("tesseract")
+    if which_path:
+        return str(Path(which_path).resolve())
+
+    # 4. Standard Windows install locations
+    candidate_paths = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Tesseract-OCR\tesseract.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
+        r"E:\RAG\tesseract.exe",
+        str((PROJECT_ROOT.parent / "tesseract.exe").resolve()),
+        str((PROJECT_ROOT / "tesseract.exe").resolve()),
+    ]
+    for p in candidate_paths:
+        if p and Path(p).is_file():
+            return str(Path(p).resolve())
+
+    return None
+
+
+def configure_tesseract(custom_cmd: Optional[str] = None) -> bool:
+    """
+    Configures pytesseract.pytesseract.tesseract_cmd with a verified executable path.
+    Logs warnings for missing binary or configuration errors.
+    Returns True if successfully configured and verified.
+    """
+    if not _OCR_AVAILABLE:
+        logger.debug("pytesseract is not installed; skipping Tesseract configuration.")
+        return False
+
+    cmd = custom_cmd or get_tesseract_cmd()
+    if not cmd:
+        configured_env = os.getenv("TESSERACT_CMD", TESSERACT_CMD)
+        logger.warning(
+            "Tesseract OCR executable not found. Configured TESSERACT_CMD='%s'. "
+            "Please ensure Tesseract is installed or specify TESSERACT_CMD in .env.",
+            configured_env,
+        )
+        return False
+
+    try:
+        pytesseract.pytesseract.tesseract_cmd = str(cmd)
+        version = pytesseract.get_tesseract_version()
+        logger.info("Tesseract OCR configured successfully at '%s' (v%s)", cmd, version)
+        return True
+    except pytesseract.TesseractNotFoundError as exc:
+        logger.warning("Tesseract binary not found at '%s': %s", cmd, exc)
+        return False
+    except Exception as exc:
+        logger.error("Tesseract initialization/verification error for '%s': %s", cmd, exc)
+        return False
+
+
+# Auto-configure Tesseract on module import if available
+if _OCR_AVAILABLE:
+    configure_tesseract()
+
+
+def is_ocr_available() -> bool:
+    """Checks whether an OCR engine (custom or pytesseract with binary) is available."""
+    if _CUSTOM_OCR_FUNC is not None:
+        return True
+    if not _OCR_AVAILABLE:
+        return False
+
+    cmd = get_tesseract_cmd()
+    if not cmd:
+        return False
+
+    try:
+        pytesseract.pytesseract.tesseract_cmd = str(cmd)
+        pytesseract.get_tesseract_version()
+        return True
+    except pytesseract.TesseractNotFoundError as exc:
+        logger.warning("Tesseract binary not found at '%s': %s", cmd, exc)
+        return False
+    except Exception as exc:
+        logger.error("Tesseract configuration or execution verification error at '%s': %s", cmd, exc)
+        return False
+
+
+def run_ocr(image: Any, lang: str = "eng") -> str:
+    """
+    Executes OCR on a PIL Image, file path, or image bytes.
+    Uses registered custom OCR callable or pytesseract.
+    Ensures pytesseract.pytesseract.tesseract_cmd is configured before invocation.
+    """
+    if _CUSTOM_OCR_FUNC is not None:
+        return str(_CUSTOM_OCR_FUNC(image)).strip()
+
+    if not _OCR_AVAILABLE:
+        raise RuntimeError("pytesseract or Pillow is not installed on this system.")
+
+    cmd = get_tesseract_cmd()
+    if not cmd:
+        configured = os.getenv("TESSERACT_CMD", TESSERACT_CMD)
+        raise RuntimeError(
+            f"Tesseract OCR executable is not available. Configured path: '{configured}'. "
+            "Please verify that Tesseract is installed and TESSERACT_CMD points to tesseract.exe."
+        )
+
+    # Ensure pytesseract.pytesseract.tesseract_cmd is configured using TESSERACT_CMD
+    pytesseract.pytesseract.tesseract_cmd = str(cmd)
+
+    if not isinstance(image, _PilImage.Image):
+        image = _PilImage.open(str(image)).convert("RGB")
+
+    try:
+        return pytesseract.image_to_string(image, lang=lang).strip()
+    except pytesseract.TesseractNotFoundError as exc:
+        logger.error("Tesseract executable not found at '%s' during OCR execution: %s", cmd, exc)
+        raise RuntimeError(f"Tesseract executable not found at '{cmd}': {exc}") from exc
+    except Exception as exc:
+        logger.error("Tesseract OCR execution failed with engine '%s': %s", cmd, exc)
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Scanned PDF Detection Helpers
+# ---------------------------------------------------------------------------
+
+def is_scanned_page(page: Any, min_char_threshold: int = 15) -> bool:
+    """
+    Detects if a PDF page is a scanned document (image-only or minimal embedded text).
+    A page is considered scanned if extracted text length is below threshold
+    AND the page contains images or raster elements.
+    """
+    text = page.get_text("text").strip()
+    if len(text) >= min_char_threshold:
+        return False
+
+    # Check for embedded raster images
+    try:
+        images = page.get_images()
+        if len(images) > 0:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def is_scanned_pdf(file_path: Union[str, Path], min_char_threshold: int = 15) -> bool:
+    """Checks whether any page in a PDF is scanned."""
+    file_path = Path(file_path)
+    if not file_path.exists():
+        return False
+    try:
+        with pymupdf.open(str(file_path)) as doc:
+            return any(is_scanned_page(p, min_char_threshold) for p in doc)
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Extension sets
 # ---------------------------------------------------------------------------
+
+IMAGE_EXTENSIONS: Set[str] = {".png", ".jpg", ".jpeg", ".webp"}
+VIDEO_EXTENSIONS: Set[str] = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+DOCUMENT_EXTENSIONS: Set[str] = {".pdf", ".docx", ".txt"}
 
 # SUPPORTED_EXTENSIONS: all file types this module can handle.
 SUPPORTED_EXTENSIONS: Set[str] = {
@@ -78,12 +289,12 @@ EXTRACTABLE_EXTENSIONS: Set[str] = _ExtractableExtensions({".pdf", ".docx", ".tx
 def extract_pdf(file_path: Union[str, Path]) -> Dict[str, Any]:
     """
     Extract text page-by-page from a PDF using PyMuPDF.
-    Falls back to Tesseract OCR for scanned (image-only) pages when available.
+    Detects scanned pages and falls back to OCR when available.
 
     Returns a dict with:
         file_type, total_pages, raw_text, char_count, word_count,
-        pages (list of {page_number, text, char_count}),
-        pdf_metadata, metadata (alias for Streamlit compatibility)
+        pages (list of {page_number, text, char_count, extraction_method, is_scanned}),
+        is_scanned, ocr_applied, pdf_metadata, metadata
     """
     file_path = Path(file_path)
     extracted_pages: List[Dict[str, Any]] = []
@@ -93,18 +304,25 @@ def extract_pdf(file_path: Union[str, Path]) -> Dict[str, Any]:
         for page_number, page in enumerate(pdf, start=1):
             text = page.get_text("text").strip()
             extraction_method = "pymupdf"
+            scanned = is_scanned_page(page)
 
-            # OCR fallback for scanned pages (only when pytesseract is available)
-            if not text and _OCR_AVAILABLE:
-                try:
-                    pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
-                    image = _PilImage.open(BytesIO(pix.tobytes("png")))
-                    text = pytesseract.image_to_string(image, lang="eng").strip()
-                    extraction_method = "ocr"
-                except Exception as ocr_err:
-                    logger.debug("PDF page %d OCR fallback failed: %s", page_number, ocr_err)
-                    text = ""
-                    extraction_method = "failed"
+            # OCR fallback for scanned pages
+            if scanned:
+                if is_ocr_available():
+                    try:
+                        pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
+                        image = _PilImage.open(BytesIO(pix.tobytes("png")))
+                        ocr_text = run_ocr(image, lang="eng")
+                        if ocr_text:
+                            text = ocr_text
+                            extraction_method = "ocr_fallback"
+                        else:
+                            extraction_method = "ocr_empty"
+                    except Exception as ocr_err:
+                        logger.debug("PDF page %d OCR fallback failed: %s", page_number, ocr_err)
+                        extraction_method = "ocr_failed"
+                else:
+                    extraction_method = "ocr_unavailable"
 
             extracted_pages.append(
                 {
@@ -113,10 +331,14 @@ def extract_pdf(file_path: Union[str, Path]) -> Dict[str, Any]:
                     "char_count": len(text),
                     "word_count": len(text.split()) if text else 0,
                     "extraction_method": extraction_method,
+                    "is_scanned": scanned,
                 }
             )
 
     raw_text = "\n\n".join(p["text"] for p in extracted_pages if p["text"])
+    is_scanned = any(p.get("is_scanned", False) for p in extracted_pages)
+    ocr_applied = any(p.get("extraction_method") == "ocr_fallback" for p in extracted_pages)
+
     return {
         "file_type": "pdf",
         "total_pages": len(extracted_pages),
@@ -124,6 +346,8 @@ def extract_pdf(file_path: Union[str, Path]) -> Dict[str, Any]:
         "char_count": len(raw_text),
         "word_count": len(raw_text.split()) if raw_text else 0,
         "pages": extracted_pages,
+        "is_scanned": is_scanned,
+        "ocr_applied": ocr_applied,
         "pdf_metadata": pdf_metadata,
         # Unified alias kept for Streamlit compatibility
         "metadata": pdf_metadata,
@@ -132,31 +356,41 @@ def extract_pdf(file_path: Union[str, Path]) -> Dict[str, Any]:
 
 def extract_image(file_path: Union[str, Path]) -> Dict[str, Any]:
     """
-    Extract text from images using Tesseract OCR.
-    Returns an empty result gracefully when OCR libraries are not installed.
+    Extract text from images using Tesseract OCR (or registered OCR engine).
+    Gracefully handles missing OCR binaries, empty images, and corrupted files.
     """
     file_path = Path(file_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"Image file not found: {file_path}")
+
     text = ""
     method = "tesseract_ocr"
+    error = None
 
-    if _OCR_AVAILABLE:
+    if is_ocr_available():
         try:
             image = _PilImage.open(str(file_path)).convert("RGB")
-            text = pytesseract.image_to_string(image, lang="eng").strip()
+            text = run_ocr(image, lang="eng")
+            method = "tesseract_ocr" if _CUSTOM_OCR_FUNC is None else "custom_ocr"
         except Exception as e:
-            logger.warning("Image OCR extraction error on %s: %s", file_path.name, e)
-            method = "ocr_unavailable"
+            logger.error("Image OCR extraction error on %s: %s", file_path.name, e)
+            method = "failed"
+            error = str(e)
     else:
+        cmd = get_tesseract_cmd() or os.getenv("TESSERACT_CMD", TESSERACT_CMD)
         method = "ocr_unavailable"
-        logger.debug("OCR skipped for %s — pytesseract not installed.", file_path.name)
+        error = f"Tesseract OCR engine is not available (configured: '{cmd}')."
+        logger.warning("OCR skipped for %s — Tesseract not available (configured: '%s').", file_path.name, cmd)
 
     return {
         "file_type": "image",
+        "category": "images",
         "text": text,
         "raw_text": text,
         "char_count": len(text),
         "word_count": len(text.split()) if text else 0,
         "extraction_method": method,
+        "error": error,
     }
 
 
@@ -295,7 +529,7 @@ def extract_video(
                 try:
                     rgb_frame = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
                     image = _PilImage.fromarray(rgb_frame)
-                    text = pytesseract.image_to_string(image, lang="eng").strip()
+                    text = run_ocr(image, lang="eng")
                     timestamp = frame_number / fps
                     if text:
                         extracted_frames.append({

@@ -100,6 +100,25 @@ class MetadataManager:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_ext_status ON document_extraction(extraction_status);"
             )
+
+            # Processed chunks persistence table
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS document_chunks (
+                    chunk_id          TEXT PRIMARY KEY,
+                    document_id       TEXT NOT NULL,
+                    chunk_index       INTEGER NOT NULL,
+                    text              TEXT NOT NULL,
+                    page_number       INTEGER DEFAULT 0,
+                    estimated_tokens  INTEGER DEFAULT 0,
+                    created_at        TEXT NOT NULL,
+                    metadata_json     TEXT
+                );
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chunk_doc_id ON document_chunks(document_id);"
+            )
             conn.commit()
 
         # Schema migration: add error_message column if upgrading from older DB
@@ -385,9 +404,117 @@ class MetadataManager:
             cursor = conn.execute("SELECT COALESCE(SUM(file_size_bytes), 0) FROM document_metadata;")
             return cursor.fetchone()[0]
 
-    def delete(self, document_id: str) -> bool:
-        """Deletes document metadata and extraction records by ID."""
+    # ------------------------------------------------------------------
+    # Chunks persistence helpers (Phase 4)
+    # ------------------------------------------------------------------
+
+    def save_chunks(self, document_id: str, chunks: List[Dict[str, Any]]) -> bool:
+        """
+        Persists preprocessed chunks for a document in SQLite.
+        Replaces any prior chunks for this document to ensure idempotency.
+        """
+        if not chunks:
+            return False
+
+        now_iso = datetime.now(timezone.utc).isoformat()
         with self._get_connection() as conn:
+            # Delete any existing chunks for this document first
+            conn.execute("DELETE FROM document_chunks WHERE document_id = ?;", (document_id,))
+
+            insert_rows = []
+            for idx, c in enumerate(chunks):
+                chunk_idx = c.get("chunk_index", idx)
+                chunk_id = c.get("chunk_id", f"{document_id}_chunk_{chunk_idx}")
+                text = c.get("text", "")
+                page_no = c.get("page_number") or 0
+                tokens = c.get("estimated_tokens", 0)
+
+                # Store metadata payload without the heavy raw text to avoid duplication
+                meta_copy = {k: v for k, v in c.items() if k not in ("text", "embedding")}
+                meta_json = json.dumps(meta_copy, ensure_ascii=False)
+
+                insert_rows.append((
+                    chunk_id,
+                    document_id,
+                    chunk_idx,
+                    text,
+                    page_no,
+                    tokens,
+                    now_iso,
+                    meta_json,
+                ))
+
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO document_chunks (
+                    chunk_id, document_id, chunk_index, text, page_number,
+                    estimated_tokens, created_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                insert_rows,
+            )
+            conn.commit()
+
+        logger.info("Persisted %d chunks for doc_id=%s in SQLite.", len(chunks), document_id)
+        return True
+
+    def get_chunks(self, document_id: str) -> List[Dict[str, Any]]:
+        """Retrieves persisted chunks for a document sorted by chunk_index."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT chunk_id, document_id, chunk_index, text, page_number,
+                       estimated_tokens, created_at, metadata_json
+                FROM document_chunks
+                WHERE document_id = ?
+                ORDER BY chunk_index ASC;
+                """,
+                (document_id,),
+            )
+            rows = cursor.fetchall()
+            results = []
+            for r in rows:
+                item = {
+                    "chunk_id": r["chunk_id"],
+                    "document_id": r["document_id"],
+                    "chunk_index": r["chunk_index"],
+                    "text": r["text"],
+                    "page_number": r["page_number"],
+                    "estimated_tokens": r["estimated_tokens"],
+                    "created_at": r["created_at"],
+                }
+                if r["metadata_json"]:
+                    try:
+                        extra = json.loads(r["metadata_json"])
+                        item.update(extra)
+                    except Exception:
+                        pass
+                results.append(item)
+            return results
+
+    def delete_chunks(self, document_id: str) -> int:
+        """Deletes all persisted chunks for a document."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("DELETE FROM document_chunks WHERE document_id = ?;", (document_id,))
+            conn.commit()
+            return cursor.rowcount
+
+    def count_chunks(self, document_id: Optional[str] = None) -> int:
+        """Returns total chunk count across all documents, or for a specific document."""
+        with self._get_connection() as conn:
+            if document_id:
+                cursor = conn.execute("SELECT COUNT(*) FROM document_chunks WHERE document_id = ?;", (document_id,))
+            else:
+                cursor = conn.execute("SELECT COUNT(*) FROM document_chunks;")
+            return cursor.fetchone()[0]
+
+    def delete(self, document_id: str) -> bool:
+        """Deletes document metadata, extraction records, and chunks by ID."""
+        with self._get_connection() as conn:
+            cur_chk = conn.execute(
+                "DELETE FROM document_chunks WHERE document_id = ?;",
+                (document_id,),
+            )
             cur_ext = conn.execute(
                 "DELETE FROM document_extraction WHERE document_id = ?;",
                 (document_id,),
@@ -397,4 +524,4 @@ class MetadataManager:
                 (document_id,),
             )
             conn.commit()
-            return (cur_doc.rowcount > 0) or (cur_ext.rowcount > 0)
+            return (cur_doc.rowcount > 0) or (cur_ext.rowcount > 0) or (cur_chk.rowcount > 0)

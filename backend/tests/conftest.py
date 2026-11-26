@@ -69,6 +69,30 @@ def pipeline(validator, storage_manager, metadata_manager):
     )
 
 
+@pytest.fixture
+def multimodal_pipeline(tmp_path, validator, storage_manager, metadata_manager):
+    """Provides an IngestionPipeline instance with multimodal processing enabled and isolated ChromaDB."""
+    from backend.ingestion.embeddings import EmbeddingService
+    from backend.ingestion.vector_store import VectorStoreManager
+
+    chroma_dir = tmp_path / "mm_chroma"
+    chroma_dir.mkdir(parents=True, exist_ok=True)
+    emb_svc = EmbeddingService()
+    v_store = VectorStoreManager(
+        persist_dir=chroma_dir,
+        collection_name="test_multimodal_rag",
+        embedding_service=emb_svc,
+    )
+    return IngestionPipeline(
+        validator=validator,
+        storage_manager=storage_manager,
+        metadata_manager=metadata_manager,
+        embedding_service=emb_svc,
+        vector_store=v_store,
+        enable_multimodal=True,
+    )
+
+
 # Sample content generators
 def create_sample_pdf() -> bytes:
     """Generates a valid minimalist PDF file buffer."""
@@ -219,3 +243,54 @@ def create_sample_aac() -> bytes:
     # ADTS sync word: 12 bits 0xFFF + layer/profile bits
     return b"\xff\xf1\x50\x80\x01\x20\x00" + b"\x00" * 100
 
+
+def create_scanned_pdf() -> bytes:
+    """
+    Generates a genuine scanned PDF: single page containing only a raster image
+    and zero digital text.
+    """
+    import pymupdf
+    doc = pymupdf.open()
+    page = doc.new_page(width=200, height=200)
+    img_bytes = create_sample_png()
+    page.insert_image(pymupdf.Rect(0, 0, 200, 200), stream=img_bytes)
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
+
+def create_real_video_mp4(duration_s: float = 0.5) -> bytes:
+    """
+    Generates a real, playable MP4 video file with both video and AAC audio tracks
+    using FFmpeg.
+    """
+    import subprocess
+    import tempfile
+    import os
+    from backend.ingestion.audio_transcriber import get_ffmpeg_path
+
+    ff_bin = get_ffmpeg_path()
+    tf = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    tf.close()
+    out_path = tf.name
+
+    cmd = [
+        ff_bin,
+        "-y",
+        "-f", "lavfi",
+        "-i", f"testsrc=duration={duration_s}:size=160x120:rate=10",
+        "-f", "lavfi",
+        "-i", f"sine=frequency=440:duration={duration_s}",
+        "-c:v", "libx264",
+        "-c:a", "aac",
+        "-shortest",
+        out_path,
+    ]
+    try:
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        with open(out_path, "rb") as f:
+            data = f.read()
+        return data
+    finally:
+        if os.path.exists(out_path):
+            os.unlink(out_path)

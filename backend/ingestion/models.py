@@ -60,10 +60,13 @@ class IngestionResult(BaseModel):
     success: bool
     upload_success: bool = False
     extraction_status: str = "not_applicable"
+    embedding_status: str = "not_applicable"
     document_id: Optional[str] = None
     validation_result: ValidationResult
     metadata: Optional[DocumentMetadata] = None
     extracted_content: Optional[Dict[str, Any]] = None
     preprocessed_content: Optional[list] = None
+    vector_count: int = 0
     extraction_error: Optional[str] = None
+    embedding_error: Optional[str] = None
     message: str

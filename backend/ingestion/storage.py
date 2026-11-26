@@ -150,3 +150,11 @@ class StorageManager:
             with open(target_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         return None
+
+    def delete_transcript_json(self, document_id: str) -> bool:
+        """Deletes transcript JSON from disk if it exists."""
+        target_path = self.transcripts_dir / f"{document_id}.json"
+        if target_path.exists() and target_path.is_file():
+            target_path.unlink()
+            return True
+        return False
