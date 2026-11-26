@@ -35,7 +35,11 @@ from backend.ingestion.metadata import MetadataManager
 from backend.ingestion.models import ValidationStatus
 from backend.ingestion.pipeline import IngestionPipeline
 from backend.ingestion.storage import StorageManager
-from backend.ingestion.text_extractor import EXTRACTABLE_EXTENSIONS
+from backend.ingestion.text_extractor import (
+    EXTRACTABLE_EXTENSIONS,
+    IMAGE_EXTENSIONS,
+    VIDEO_EXTENSIONS,
+)
 from backend.ingestion.validator import FileValidator
 
 # Page Configuration
@@ -108,6 +112,7 @@ def get_pipeline() -> IngestionPipeline:
         validator=validator,
         storage_manager=storage,
         metadata_manager=metadata,
+        enable_multimodal=True,
     )
 
 
@@ -164,14 +169,21 @@ def render_extraction(
 
     if file_type == "pdf":
         pages = extracted.get("pages", [])
+        if extracted.get("is_scanned"):
+            if extracted.get("ocr_applied"):
+                st.warning("⚠️ Scanned PDF detected: Tesseract OCR fallback was successfully applied.")
+            else:
+                st.info("ℹ️ Scanned PDF detected: minimal digital text found.")
+
         if not any(p.get("text") for p in pages):
             st.info(
-                "No digital text found in this PDF (may be scanned). "
-                "OCR support is planned for a future phase."
+                "No extractable text found in this PDF (may be scanned without OCR)."
             )
         else:
             for page in pages:
                 label = f"Page {page.get('page_number', '?')}"
+                if page.get("extraction_method") == "ocr_fallback":
+                    label += " [OCR Fallback]"
                 if page.get("char_count", len(page.get("text", ""))):
                     label += f"  ({page.get('char_count', len(page.get('text', '')))} chars)"
                 with st.expander(label, expanded=False):
@@ -206,7 +218,35 @@ def render_extraction(
             key=f"{base_key}_txt_content",
         )
 
-    elif extracted.get("category") == "audio" or file_type in ("mp3", "wav", "m4a", "aac", "ogg", "flac"):
+    elif (
+        file_type in ("image", "images", "png", "jpg", "jpeg", "webp", ".png", ".jpg", ".jpeg", ".webp")
+        or file_type in IMAGE_EXTENSIONS
+        or extracted.get("category") == "images"
+    ):
+        ocr_method = extracted.get("extraction_method", "tesseract_ocr")
+        raw = extracted.get("raw_text") or extracted.get("text", "")
+        st.caption(f"**Image OCR ({ocr_method}):** {char_count:,} chars · {word_count:,} words")
+        if raw:
+            st.markdown(f"**OCR Recognized Text ({ocr_method})**")
+            st.text_area(
+                "Recognized Text:",
+                raw,
+                height=200,
+                key=f"{base_key}_image_ocr",
+            )
+        else:
+            if extracted.get("error"):
+                st.warning(f"⚠️ OCR Notice: {extracted.get('error')}")
+            else:
+                st.info("No readable text detected in this image (or OCR engine is unavailable).")
+
+    elif (
+        extracted.get("category") in ("audio", "videos")
+        or file_type in ("mp3", "wav", "m4a", "aac", "ogg", "flac", "mp4", "mov", "avi", "mkv", "webm")
+    ):
+        is_video = extracted.get("category") == "videos" or file_type in ("mp4", "mov", "avi", "mkv", "webm")
+        media_label = "Video" if is_video else "Audio"
+        media_key = "video" if is_video else "audio"
         duration = extracted.get("duration", 0.0)
         language = extracted.get("language", "unknown")
         lang_prob = extracted.get("language_probability", 0.0)
@@ -214,22 +254,22 @@ def render_extraction(
         seg_count = extracted.get("segment_count", len(segments))
 
         st.caption(
-            f"**Audio Transcript:** {char_count:,} chars · {word_count:,} words · {duration:.2f}s duration · "
+            f"**{media_label} Transcript:** {char_count:,} chars · {word_count:,} words · {duration:.2f}s duration · "
             f"Language: `{language}` ({lang_prob*100:.1f}%) · {seg_count} segments"
         )
 
         raw = extracted.get("raw_text", "")
         if raw:
-            st.markdown("**Transcript Full Text**")
+            st.markdown(f"**{media_label} Transcript Full Text**")
             st.text_area(
-                "Full Transcript:",
+                f"Full {media_label} Transcript:",
                 raw,
                 height=180,
                 label_visibility="collapsed",
-                key=f"{base_key}_audio_transcript",
+                key=f"{base_key}_{media_key}_transcript",
             )
         else:
-            st.info("No speech detected in audio file.")
+            st.info(f"No speech detected in {media_label.lower()} file.")
 
         if segments:
             st.markdown(f"**Timestamped Segments ({len(segments)})**")
@@ -243,9 +283,9 @@ def render_extraction(
 
         # Download JSON button with stable key
         st.download_button(
-            label="📥 Download Transcript JSON",
+            label=f"📥 Download {media_label} Transcript JSON",
             data=json.dumps(extracted, indent=2, ensure_ascii=False),
-            file_name=f"transcript_{stable_id}_{file_type or 'audio'}.json",
+            file_name=f"transcript_{stable_id}_{file_type or media_label.lower()}.json",
             mime="application/json",
             key=f"{base_key}_dl_transcript_json",
         )
@@ -274,7 +314,7 @@ with st.sidebar:
         width=48,
     )
     st.title("UpToSkills AI")
-    st.caption("RAG Ingestion Pipeline • Phase 2")
+    st.caption("RAG Ingestion Pipeline • Phase 5 (Multimodal)")
     st.markdown("---")
 
     st.subheader("Allowed Extensions & Limits")
@@ -293,16 +333,19 @@ with st.sidebar:
     st.markdown("---")
 
     st.subheader("Storage Configuration")
-    st.code(f"Uploads: {STORAGE_BASE_DIR.name}\nDB: {METADATA_DB_PATH.name}", language="text")
+    chroma_info = f"\nChroma: {pipeline.vector_store.persist_dir.name}\nModel: {pipeline.embeddings.model_name}"
+    st.code(f"Uploads: {STORAGE_BASE_DIR.name}\nDB: {METADATA_DB_PATH.name}{chroma_info}", language="text")
 
     # Refresh metrics
     total_docs = metadata_mgr.count_total()
     total_bytes = metadata_mgr.get_total_storage_bytes()
     cat_counts = metadata_mgr.count_by_category()
+    total_vectors = pipeline.vector_store.count_vectors()
 
     st.markdown("---")
     st.write(f"**Total Cataloged Files:** {total_docs}")
     st.write(f"**Total Storage Used:** {format_bytes(total_bytes)}")
+    st.write(f"**Indexed Vectors (Chroma):** {total_vectors}")
 
     if st.button("🔄 Refresh Data", use_container_width=True):
         st.rerun()
@@ -311,7 +354,7 @@ with st.sidebar:
 # Main Header
 st.markdown('<div class="main-header">UpToSkills RAG Ingestion Pipeline</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="sub-header">Phase 2: Document Upload, Validation, Deduplication, Persistent Text Extraction & Cataloging</div>',
+    '<div class="sub-header">Phase 5: Multimodal Document Ingestion — PDF, DOCX, TXT, Image OCR, Scanned PDF Fallback, Audio & Video Transcription with Timestamps & ChromaDB</div>',
     unsafe_allow_html=True,
 )
 
@@ -366,8 +409,9 @@ with tab_upload:
             duplicate_count = sum(1 for r in results if r.validation_result.is_duplicate)
             invalid_count   = sum(1 for r in results if not r.success and not r.validation_result.is_duplicate)
             extracted_count = sum(1 for r in results if r.extraction_status == "success")
+            indexed_vectors = sum(r.vector_count for r in results)
 
-            col1, col2, col3, col4, col5 = st.columns(5)
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
             with col1:
                 st.metric("Total Processed", len(results))
             with col2:
@@ -375,8 +419,10 @@ with tab_upload:
             with col3:
                 st.metric("Text Extracted", extracted_count)
             with col4:
-                st.metric("Duplicates", duplicate_count)
+                st.metric("Vectors Indexed", indexed_vectors)
             with col5:
+                st.metric("Duplicates", duplicate_count)
+            with col6:
                 st.metric("Validation Failures", invalid_count)
 
             st.markdown("---")
@@ -400,8 +446,16 @@ with tab_upload:
                     "not_applicable": "—",
                 }.get(res.extraction_status, "—")
 
+                # Embedding badge
+                vec_badge = {
+                    "indexed":        f"🟣 ChromaDB ({res.vector_count} vectors)",
+                    "retrieved":      f"🔵 ChromaDB ({res.vector_count} vectors)",
+                    "failed":         "🔴 Embedding Failed",
+                    "not_applicable": "—",
+                }.get(res.embedding_status, "—")
+
                 with st.expander(
-                    f"{status_badge} · {ext_badge} — {val.safe_filename or 'File'}",
+                    f"{status_badge} · {ext_badge} · {vec_badge} — {val.safe_filename or 'File'}",
                     expanded=True,
                 ):
                     col_a, col_b = st.columns(2)
@@ -415,15 +469,34 @@ with tab_upload:
                         st.write(f"**SHA-256:** `{val.sha256_hash[:16]}...`" if val.sha256_hash else "**SHA-256:** `N/A`")
                         st.write(f"**Upload Status:** {res.message}")
                         st.write(f"**Extraction Status:** `{res.extraction_status}`")
+                        st.write(f"**Embedding Status:** `{res.embedding_status}` ({res.vector_count} vectors)")
 
                     if val.sha256_hash:
                         st.caption(f"Full SHA-256 Digest: `{val.sha256_hash}`")
+                    if res.embedding_error:
+                        st.warning(f"Vector Indexing Error: {res.embedding_error}")
 
                     # Audio Player if file is audio
                     if val.category == "audio" and res.metadata:
                         try:
                             audio_data = storage_mgr.read_file(res.metadata.storage_path)
                             st.audio(audio_data, format=f"audio/{val.file_type.lstrip('.')}")
+                        except Exception:
+                            pass
+
+                    # Video Player if file is video
+                    elif val.category == "videos" and res.metadata:
+                        try:
+                            video_data = storage_mgr.read_file(res.metadata.storage_path)
+                            st.video(video_data)
+                        except Exception:
+                            pass
+
+                    # Image Preview if file is image
+                    elif val.category == "images" and res.metadata:
+                        try:
+                            img_data = storage_mgr.read_file(res.metadata.storage_path)
+                            st.image(img_data, caption=val.safe_filename, use_container_width=True)
                         except Exception:
                             pass
 
@@ -450,9 +523,10 @@ with tab_upload:
                         with st.expander(f"View {len(res.preprocessed_content)} chunks with token estimates", expanded=False):
                             for c_idx, chunk in enumerate(res.preprocessed_content):
                                 page_info = f" · Page {chunk['page_number']}" if chunk.get("page_number") else ""
+                                time_info = f" · Timestamp: {chunk['timestamp']}" if chunk.get("timestamp") else ""
                                 token_info = f" · ~{chunk.get('estimated_tokens', '?')} tokens"
                                 within_limit = "✅ Within limit" if chunk.get("within_token_limit", True) else "⚠️ Exceeds limit"
-                                st.markdown(f"**Chunk {c_idx + 1}** ({within_limit}{page_info}{token_info})")
+                                st.markdown(f"**Chunk {c_idx + 1}** ({within_limit}{page_info}{time_info}{token_info})")
                                 st.text(chunk.get("text", ""))
 
 
@@ -504,6 +578,7 @@ with tab_dashboard:
         table_data = []
         for d in docs:
             stats = metadata_mgr.get_extraction_stats(d.document_id)
+            vec_cnt = pipeline.vector_store.count_by_document(d.document_id)
             table_data.append(
                 {
                     "Document ID": d.document_id,
@@ -516,6 +591,7 @@ with tab_dashboard:
                     "Upload Status": d.status,
                     "Extraction": stats["extraction_status"] if stats else "not extracted",
                     "Words": str(stats["word_count"]) if (stats and stats.get("word_count") is not None) else "—",
+                    "Vectors": str(vec_cnt) if vec_cnt > 0 else "—",
                 }
             )
 
@@ -563,6 +639,35 @@ with tab_dashboard:
                         st.write(f"Pages: `{ext_stats['page_count']}`")
                     st.write(f"Extracted at: `{ext_stats['extracted_at'][:19]}`")
 
+                # Vector store stats panel
+                doc_vec_count = pipeline.vector_store.count_by_document(selected_doc.document_id)
+                st.markdown("**Vector Store Status:**")
+                if doc_vec_count > 0:
+                    st.success(f"✅ {doc_vec_count} vectors indexed in `{pipeline.vector_store.collection_name}`")
+                else:
+                    st.info("No vectors indexed for this document.")
+
+                # Document management action buttons
+                st.markdown("**Document Management:**")
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    if st.button("🔄 Reprocess", key=f"reprocess_btn_{selected_doc.document_id}", use_container_width=True):
+                        with st.spinner("Reprocessing & indexing..."):
+                            rep = pipeline.reprocess_document(selected_doc.document_id)
+                            if rep and rep.success:
+                                st.success(f"Reprocessed: {rep.vector_count} vectors indexed.")
+                                st.rerun()
+                            else:
+                                st.error("Reprocessing failed.")
+                with col_btn2:
+                    if st.button("🗑️ Delete", key=f"delete_btn_{selected_doc.document_id}", use_container_width=True):
+                        with st.spinner("Deleting..."):
+                            if pipeline.delete_document(selected_doc.document_id):
+                                st.success(f"Deleted '{selected_doc.document_id}'.")
+                                st.rerun()
+                            else:
+                                st.error("Deletion failed.")
+
                 # Preview section based on category
                 if disk_exists:
                     try:
@@ -585,7 +690,9 @@ with tab_dashboard:
             is_extractable = (
                 selected_doc.file_type in EXTRACTABLE_EXTENSIONS
                 or selected_doc.file_type in AUDIO_EXTENSIONS
-                or selected_doc.category == "audio"
+                or selected_doc.file_type in IMAGE_EXTENSIONS
+                or selected_doc.file_type in VIDEO_EXTENSIONS
+                or selected_doc.category in ("documents", "audio", "images", "videos")
             )
             if not is_extractable:
                 st.info("Text extraction is not applicable for this file type.")
@@ -603,41 +710,82 @@ with tab_dashboard:
                 else:
                     st.warning("No extraction data available.")
 
+                # Document Chunks & Vector Store Records Viewer
+                chunks_in_db = metadata_mgr.get_chunks(selected_doc.document_id)
+                st.markdown("---")
+                st.markdown(f"#### 🧩 Processed Chunks & Vectors ({len(chunks_in_db)})")
+                if chunks_in_db:
+                    with st.expander(f"View {len(chunks_in_db)} indexed chunk records in SQLite & ChromaDB", expanded=False):
+                        for ch_i, chunk_item in enumerate(chunks_in_db):
+                            page_str = f" · Page {chunk_item['page_number']}" if chunk_item.get("page_number") else ""
+                            tok_str = f" · ~{chunk_item.get('estimated_tokens', '?')} tokens"
+                            st.markdown(f"**Chunk ID:** `{chunk_item['chunk_id']}` (Index {chunk_item.get('chunk_index', ch_i)}{page_str}{tok_str})")
+                            st.text_area("Chunk Text", chunk_item.get("text", ""), height=100, key=f"inspect_chk_{selected_doc.document_id}_{ch_i}", label_visibility="collapsed")
+                else:
+                    st.caption("No chunk records persisted for this document.")
+
     else:
         st.info("No documents found matching the filter criteria. Use the Upload tab to ingest documents.")
+
+    # ──────────────────────────────────────────────────────────────
+    # Semantic Vector Search / Query Sandbox
+    # ──────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🔍 Vector Retrieval Sandbox (Query Test)")
+    st.caption("Test semantic search directly against the persistent ChromaDB collection (`uptoskills_rag`).")
+    q_col1, q_col2 = st.columns([4, 1])
+    with q_col1:
+        query_input = st.text_input("Enter semantic query:", placeholder="e.g. What are the key machine learning topics?", key="vector_sandbox_query")
+    with q_col2:
+        top_k_val = st.number_input("Top K", min_value=1, max_value=10, value=3, step=1, key="vector_sandbox_top_k")
+
+    if st.button("🔎 Run Vector Search", key="vector_sandbox_search_btn", type="primary"):
+        if not query_input.strip():
+            st.warning("Please enter a query text.")
+        else:
+            with st.spinner("Embedding query & searching ChromaDB..."):
+                results = pipeline.vector_store.query_by_text(query_input.strip(), top_k=top_k_val)
+                if not results:
+                    st.info("No matching vectors found in ChromaDB collection.")
+                else:
+                    st.success(f"Found {len(results)} matching chunks (cosine similarity ranking):")
+                    for hit_idx, hit in enumerate(results, start=1):
+                        score_pct = f"{hit['score'] * 100:.1f}%" if "score" in hit else "N/A"
+                        dist_val = f"{hit['distance']:.4f}" if "distance" in hit else "N/A"
+                        doc_id_val = hit.get("document_id", "N/A")
+                        chunk_id_val = hit.get("chunk_id", "N/A")
+                        meta_fn = hit.get("metadata", {}).get("filename", "")
+                        fn_str = f" · File: `{meta_fn}`" if meta_fn else ""
+                        with st.expander(f"#{hit_idx} · Match Score: {score_pct} (Cosine Dist: {dist_val}) · Doc: `{doc_id_val}`{fn_str}", expanded=(hit_idx == 1)):
+                            st.write(f"**Chunk ID:** `{chunk_id_val}`")
+                            st.markdown("**Chunk Text:**")
+                            st.write(hit.get("text", ""))
+                            if hit.get("metadata"):
+                                st.caption(f"Metadata: {hit['metadata']}")
 
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 3: System & Validation Audit
 # ══════════════════════════════════════════════════════════════════════
 with tab_audit:
-    st.markdown("### Phase 2 System Architecture & Validation Rules")
+    st.markdown("### Phase 5 System Architecture & Multimodal Ingestion Specifications")
 
     st.markdown(
         """
         #### 1. Ingestion Boundaries
-        - **In Scope (Implemented):**
-          - Multi-format file upload and buffering.
-          - Category categorization (Documents, Images, Videos, Audio).
-          - MIME and magic-bytes header verification.
-          - Empty (0-byte) and corrupted file rejection.
-          - Configurable file size limits per category.
-          - Accidental overwrite prevention and safe filename sanitization.
-          - Cryptographic duplicate detection via SHA-256 hashing.
-          - Persistent SQLite metadata store with indexed lookup.
-          - Text extraction from PDF, DOCX and TXT using PyMuPDF and python-docx.
-          - **Audio Speech-to-Text transcription** (MP3, WAV, M4A, AAC, OGG, FLAC) via faster-whisper & FFmpeg.
-          - **Timestamped and segmented transcripts** with duration and language detection.
-          - **Persistent extraction & transcript storage** in JSON files and `document_extraction` SQLite table.
-          - Extraction & transcript retrieval on duplicate upload & Document Inspector.
-          - Separate upload status and extraction status tracking.
-          - On-demand re-extraction/re-transcription from stored file when DB record is missing.
-        - **Out of Scope (Phase 3+):**
-          - OCR for scanned PDFs (Tesseract / Amazon Textract).
-          - Live microphone voice commands (Query Processing phase).
-          - Video audio extraction and transcription (Whisper).
-          - Text preprocessing, cleaning, chunking.
-          - Embedding generation & ChromaDB vector ingestion.
+        - **In Scope (Implemented - Phases 1 to 5):**
+          - **Phase 1 (Upload & Validation):** Multi-format file buffering, categorization (documents, images, videos, audio), MIME & magic bytes verification, corruption detection, size limits, SHA-256 deduplication, safe filename generation, and SQLite metadata indexing.
+          - **Phase 2 (Text Extraction & Audio Transcription):** Text extraction from PDF (PyMuPDF), DOCX (python-docx), and TXT. Audio speech-to-text transcription (faster-whisper & FFmpeg) with timestamps, segmentation, and persistent JSON + SQLite extraction cache.
+          - **Phase 3 (Preprocessing & Chunking):** Text cleaning, unicode normalization, boilerplate stripping, structure-aware semantic chunking with configurable chunk sizes, token estimation, and page alignment.
+          - **Phase 4 (Embeddings & ChromaDB Vector Store):** Dense numerical embedding generation using local `all-MiniLM-L6-v2` (384 dimensions, L2 normalized) and persistent local ChromaDB storage surviving restarts (`uptoskills_rag` collection).
+          - **Phase 5 (Multimodal Ingestion):**
+            - **Image OCR:** Optical Character Recognition for PNG, JPG, JPEG, WEBP via Tesseract OCR engine with graceful degradation.
+            - **Scanned PDF Fallback:** Heuristic scanned page detection (raster images with empty text) and automated page-level OCR fallback.
+            - **Video Audio Extraction & Transcription:** Automatic audio extraction from MP4, MOV, AVI, MKV, WEBM using FFmpeg, followed by Whisper speech-to-text transcription with timestamped segments.
+            - **Timestamp & Page Preservation:** Chunks and ChromaDB vector metadata retain precise media timestamps (`start_time`, `end_time`, `timestamp`) and PDF page numbers.
+            - **End-to-End Pipeline Routing:** All extracted multimodal text flows uniformly into text preprocessing, recursive chunking, embedding generation, and ChromaDB indexing.
+        - **Out of Scope (Downstream Query Processing Team):**
+          - Query intent parsing, conversational memory, LLM prompt engineering, and response generation.
         """
     )
 
@@ -650,7 +798,7 @@ with tab_audit:
     ]
     st.table(pd.DataFrame(rule_data))
 
-    st.markdown("#### 3. Storage Diagnostics")
+    st.markdown("#### 3. Storage & Multimodal Diagnostics")
     diag_col1, diag_col2 = st.columns(2)
     with diag_col1:
         st.write(f"**Uploads Directory:** `{STORAGE_BASE_DIR}`")
@@ -658,18 +806,36 @@ with tab_audit:
         for cat in CATEGORY_DIRECTORIES.values():
             cat_dir = STORAGE_BASE_DIR / cat
             st.write(f"• `{cat}/`: {'Exists' if cat_dir.exists() else 'Missing'}")
+        # Vector Store Diagnostics
+        st.write(f"**ChromaDB Persist Dir:** `{pipeline.vector_store.persist_dir}`")
+        st.write(f"**Collection Name:** `{pipeline.vector_store.collection_name}`")
+        st.write(f"**Total Indexed Vectors:** {pipeline.vector_store.count_vectors()}")
     with diag_col2:
         st.write(f"**Metadata Database:** `{METADATA_DB_PATH}`")
         st.write(f"**Database File Exists:** {METADATA_DB_PATH.exists()}")
         st.write(f"**Database Writable:** {os.access(METADATA_DB_PATH.parent, os.W_OK)}")
-        # Extraction table stats
-        from backend.ingestion.metadata import MetadataManager as _MM
+        # Multimodal Engine Diagnostics
+        from backend.ingestion.text_extractor import is_ocr_available, get_tesseract_cmd
+        from backend.ingestion.audio_transcriber import get_ffmpeg_path, is_transcription_available
+        ocr_ready = is_ocr_available()
+        tess_bin = get_tesseract_cmd() or "Not found on PATH"
+        st.write(f"**OCR Engine:** {'✅ Available' if ocr_ready else '⚠️ Not Available'} (`{tess_bin}`)")
+        try:
+            ff_bin = get_ffmpeg_path()
+            st.write(f"**FFmpeg Binary:** ✅ Detected")
+        except Exception:
+            st.write(f"**FFmpeg Binary:** ❌ Not Found")
+        st.write(f"**Whisper Engine:** {'✅ Available' if is_transcription_available() else '❌ Missing'}")
+        st.write(f"**Embedding Model:** `{pipeline.embeddings.model_name}` ({pipeline.embeddings.dimension}d, {pipeline.embeddings.device})")
+        # Extraction & Chunk table stats
         import sqlite3 as _sq
         try:
             conn = _sq.connect(str(METADATA_DB_PATH))
             cnt = conn.execute("SELECT COUNT(*) FROM document_extraction").fetchone()[0]
             succ = conn.execute("SELECT COUNT(*) FROM document_extraction WHERE extraction_status='success'").fetchone()[0]
+            chk_cnt = conn.execute("SELECT COUNT(*) FROM document_chunks").fetchone()[0]
             conn.close()
             st.write(f"**Extraction Records:** {cnt} total · {succ} successful")
+            st.write(f"**Persisted Chunks in DB:** {chk_cnt}")
         except Exception:
             st.write("**Extraction Records:** table initializes on first upload")

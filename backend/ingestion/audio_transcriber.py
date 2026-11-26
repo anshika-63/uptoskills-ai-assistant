@@ -46,6 +46,7 @@ except ImportError:
     pass
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
 
 def get_ffmpeg_path() -> str:
@@ -189,6 +190,78 @@ def extract_audio_from_video(
     except subprocess.CalledProcessError as exc:
         err_msg = exc.stderr.decode("utf-8", errors="replace")
         raise RuntimeError(f"Video audio extraction failed: {err_msg}")
+
+
+def transcribe_video(
+    video_path: Union[str, Path],
+    model_size: Optional[str] = None,
+    language: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Extracts the audio track from a video file using FFmpeg and transcribes it
+    using faster-whisper.
+
+    Preserves timestamped segments, duration, and language metadata.
+    Handles silent videos or audio extraction failures gracefully.
+
+    Args:
+        video_path: Path to the video file (.mp4, .mov, .avi, .mkv, .webm).
+        model_size: Optional Whisper model size.
+        language: Optional language code.
+
+    Returns:
+        Structured dictionary matching transcribe_audio with video category.
+    """
+    vid_p = Path(video_path).resolve()
+    if not vid_p.exists():
+        raise FileNotFoundError(f"Video file not found: {vid_p}")
+
+    ext = vid_p.suffix.lower()
+    if ext not in VIDEO_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported video format for audio transcription: '{ext}'. "
+            f"Supported: {sorted(VIDEO_EXTENSIONS)}"
+        )
+
+    temp_wav: Optional[Path] = None
+    try:
+        temp_wav = extract_audio_from_video(vid_p)
+    except Exception as extract_err:
+        logger.warning(
+            "Could not extract audio from video '%s' (may be silent or corrupt): %s",
+            vid_p.name,
+            extract_err,
+        )
+        return {
+            "success": False,
+            "file_type": ext.lstrip("."),
+            "category": "videos",
+            "media_type": "video",
+            "raw_text": "",
+            "char_count": 0,
+            "word_count": 0,
+            "duration": 0.0,
+            "language": "unknown",
+            "language_probability": 0.0,
+            "segments": [],
+            "segment_count": 0,
+            "model_used": model_size or WHISPER_MODEL_SIZE,
+            "error": f"Audio extraction failed: {extract_err}",
+        }
+
+    try:
+        res = transcribe_audio(temp_wav, model_size=model_size, language=language, preprocess=False)
+        res["category"] = "videos"
+        res["media_type"] = "video"
+        res["file_type"] = ext.lstrip(".")
+        res["video_filename"] = vid_p.name
+        return res
+    finally:
+        if temp_wav and temp_wav.exists():
+            try:
+                temp_wav.unlink()
+            except Exception:
+                pass
 
 
 class WhisperModelManager:

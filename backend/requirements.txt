@@ -22,3 +22,7 @@ imageio-ffmpeg>=0.4.9
 
 # Testing
 pytest>=7.0.0
+
+# Vector Database & Embeddings (Phase 4)
+chromadb>=0.4.22
+sentence-transformers>=2.2.2

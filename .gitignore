@@ -48,6 +48,7 @@ coverage.xml
 # RAG Ingestion Runtime Storage & Database
 backend/storage/uploads/
 backend/storage/transcripts/
+backend/storage/chroma/
 backend/storage/*.db
 backend/storage/*.sqlite
 backend/storage/*.sqlite3
